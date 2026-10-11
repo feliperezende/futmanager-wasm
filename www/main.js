@@ -283,7 +283,7 @@ if (location.search.includes('selftest')) {
     if (fin.expectedAttendance <= 0 || fin.stadiumOptions.length !== 3) throw 'estádio';
     out.push('estadio=ok');
     if (!JSON.parse(game.take_bank_loan(100000)).ok) throw 'banco';
-    const cand = JSON.parse(game.market('', 1e12)).find((p) => p.team !== null && p.loanFee < 200000);
+    const cand = JSON.parse(game.market('', 1e12)).filter((p) => p.team !== null).sort((a, b) => a.loanFee - b.loanFee)[0];
     const lr = JSON.parse(game.loan_in(cand.id));
     if (!lr.ok) throw 'empréstimo: ' + lr.msg;
     out.push('emprestimos=ok');
