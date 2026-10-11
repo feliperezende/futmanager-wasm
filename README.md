@@ -24,7 +24,7 @@ Jogo de gerenciamento de futebol para navegador, **original e clean-room**, insp
 - **Finanças** calibradas por simulação de várias temporadas: bilheteria, cotas de TV, prêmios, salários, manutenção; clubes ricos da IA investem em reforços
 - **Dívidas**: juros de 1,5% por rodada no vermelho; IA endividada vende jogadores; o técnico sofre vendas forçadas após 6 rodadas e é **demitido** após 12 (ou dívida muito alta), recebendo propostas de outros clubes
 - **Fim de temporada**: acesso/rebaixamento (2 sobem, 2 caem), premiação, evolução/envelhecimento, aposentadorias
-- **5 slots de save** no `localStorage`, com resumo, sobrescrever/apagar e compactação gzip
+- **Saves**: 5 slots + **autosave** a cada rodada, compactados com gzip, gravados no **IndexedDB** (com fallback para `localStorage`). Se faltar espaço, o autosave é descartado automaticamente e, se ainda assim não couber, o jogo avisa para apagar um slot. Saves antigos do `localStorage` são migrados
 
 ## Requisitos
 
@@ -53,6 +53,12 @@ Abra <http://localhost:8080/www/> no navegador.
 > É preciso servir via HTTP (não abrir o arquivo direto com `file://`), pois o navegador bloqueia o carregamento de módulos WebAssembly locais.
 
 Autoteste no navegador: <http://localhost:8080/www/?selftest> (cria um jogo, faz substituição, usa base, estádio, empréstimos, contratos e slots de save, e joga uma temporada inteira). Demonstração de partida ao vivo: `?demo`.
+
+Autoteste automatizado em Chrome headless (tempo real, necessário para o IndexedDB):
+
+```bash
+node --experimental-websocket tools/headless-selftest.mjs http://localhost:8080/www/?selftest
+```
 
 ## Publicação (GitHub Pages)
 

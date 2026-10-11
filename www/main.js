@@ -13,7 +13,7 @@ function flash(r) { $('#msg').textContent = r.msg || r; $('#msg').style.color = 
 function refresh() { st = JSON.parse(game.state()); render(); }
 
 // ------------------------------------------------ Início
-function showStart() { migrateLegacy(); $('#btnLoad').disabled = !anySave(); $('#start').classList.remove('hidden'); $('#main').classList.add('hidden'); $('#pickTeam').classList.add('hidden'); }
+function showStart() { anySave().then((v) => { $('#btnLoad').disabled = !v; }); $('#start').classList.remove('hidden'); $('#main').classList.add('hidden'); $('#pickTeam').classList.add('hidden'); }
 $('#btnNew').onclick = () => {
   game = new FutManager(Math.floor(Math.random() * 1e9));
   st = JSON.parse(game.state());
@@ -31,7 +31,73 @@ function listTeams() {
 }
 $('#btnLoad').onclick = () => showSlots('load');
 
-// ------------------------------------------------ Saves (vários slots, compactados com gzip)
+// ------------------------------------------------ Armazenamento: IndexedDB (preferido) com fallback para localStorage
+// Saves compactados com gzip. Slots 1..5 + autosave. Em falta de espaço, o autosave é descartado e o usuário é avisado.
+class StorageFullError extends Error {}
+const isQuota = (e) => e && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22 || e instanceof StorageFullError);
+
+function idbStore() {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') return reject(new Error('sem IndexedDB'));
+    const req = indexedDB.open('futmanager98', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('kv');
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = (mode, fn) => new Promise((res, rej) => {
+        const t = db.transaction('kv', mode);
+        const r = fn(t.objectStore('kv'));
+        t.oncomplete = () => res(r && r.result);
+        t.onerror = t.onabort = () => rej(t.error || new Error('erro no IndexedDB'));
+      });
+      resolve({
+        kind: 'IndexedDB',
+        get: (k) => tx('readonly', (s) => s.get(k)).then((v) => v ?? null),
+        set: (k, v) => tx('readwrite', (s) => s.put(v, k)),
+        del: (k) => tx('readwrite', (s) => s.delete(k)),
+      });
+    };
+  });
+}
+const lsStore = {
+  kind: 'localStorage',
+  get: async (k) => localStorage.getItem('futmanager98_' + k),
+  set: async (k, v) => localStorage.setItem('futmanager98_' + k, v),
+  del: async (k) => localStorage.removeItem('futmanager98_' + k),
+};
+let store = lsStore;
+
+async function initStorage() {
+  try {
+    // se o IndexedDB não responder (modo privado/bloqueado), usa localStorage
+    store = await Promise.race([idbStore(), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000))]);
+  } catch (e) { store = lsStore; }
+  if (store !== lsStore) {
+    // migra saves antigos do localStorage para o IndexedDB
+    const legacy = localStorage.getItem(SAVE_KEY);
+    if (legacy && !(await store.get('slot_1'))) { await store.set('slot_1', legacy); await store.set('meta_1', JSON.stringify({ team: '(save antigo)', season: '?', round: '?' })); }
+    localStorage.removeItem(SAVE_KEY);
+    for (let n = 1; n <= SLOTS; n++) {
+      const d = localStorage.getItem(slotKey(n));
+      if (d) {
+        if (!(await store.get('slot_' + n))) { await store.set('slot_' + n, d); await store.set('meta_' + n, localStorage.getItem(metaKey(n)) || '{}'); }
+        localStorage.removeItem(slotKey(n)); localStorage.removeItem(metaKey(n));
+      }
+    }
+  }
+}
+
+/** Grava; se faltar espaço, descarta o autosave e tenta de novo. */
+async function putWithPrune(key, data, meta) {
+  const write = async () => { await store.set(key, data); await store.set(key.replace('slot_', 'meta_').replace('autosave', 'autosave_meta'), JSON.stringify(meta)); };
+  try { await write(); return; } catch (e) { if (!isQuota(e)) throw e; }
+  if (key !== 'autosave') { await store.del('autosave'); await store.del('autosave_meta'); }
+  try { await write(); } catch (e) {
+    if (isQuota(e)) throw new StorageFullError('Sem espaço para salvar no navegador. Apague um slot antigo e tente de novo.');
+    throw e;
+  }
+}
+
 async function pack(str) {
   if (typeof CompressionStream === 'undefined') return str;
   const buf = await new Response(new Blob([str]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
@@ -46,58 +112,73 @@ async function unpack(data) {
   const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
   return await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
 }
-function migrateLegacy() {
-  const old = localStorage.getItem(SAVE_KEY);
-  if (old && !localStorage.getItem(slotKey(1))) {
-    localStorage.setItem(slotKey(1), old);
-    localStorage.setItem(metaKey(1), JSON.stringify({ team: '(save antigo)', season: '?', round: '?', date: '' }));
-  }
-  if (old) localStorage.removeItem(SAVE_KEY);
+const keyOf = (n) => (n === 'auto' ? 'autosave' : 'slot_' + n);
+const metaOf = (n) => (n === 'auto' ? 'autosave_meta' : 'meta_' + n);
+async function slotMeta(n) { try { return JSON.parse(await store.get(metaOf(n))); } catch (e) { return null; } }
+async function anySave() {
+  for (const n of ['auto', 1, 2, 3, 4, 5]) if (await store.get(keyOf(n))) return true;
+  return false;
 }
-function slotMeta(n) { try { return JSON.parse(localStorage.getItem(metaKey(n))); } catch (e) { return null; } }
-function anySave() { for (let n = 1; n <= SLOTS; n++) if (localStorage.getItem(slotKey(n))) return true; return false; }
-async function saveSlot(n) {
+async function saveSlot(n, quiet) {
   const data = await pack(game.save());
   const meta = { ...JSON.parse(game.summary()), date: new Date().toLocaleString('pt-BR') };
-  try {
-    localStorage.setItem(slotKey(n), data);
-    localStorage.setItem(metaKey(n), JSON.stringify(meta));
-  } catch (e) { flash({ ok: false, msg: 'Sem espaço no navegador para salvar: apague outro slot.' }); return false; }
-  flash({ ok: true, msg: `Jogo salvo no slot ${n}.` });
+  try { await putWithPrune(keyOf(n), data, meta); } catch (e) {
+    flash({ ok: false, msg: e instanceof StorageFullError ? e.message : 'Erro ao salvar: ' + e });
+    return false;
+  }
+  if (!quiet) flash({ ok: true, msg: n === 'auto' ? 'Autosave feito.' : `Jogo salvo no slot ${n}.` });
   return true;
 }
 async function loadSlot(n) {
-  const data = localStorage.getItem(slotKey(n));
+  const data = await store.get(keyOf(n));
   if (!data) throw new Error('Slot vazio');
   game = FutManager.load(await unpack(data));
 }
-function showSlots(mode) {
-  migrateLegacy();
+const autosaveOn = () => localStorage.getItem('futmanager98_pref_autosave') !== '0';
+async function autosave() { if (autosaveOn() && game) await saveSlot('auto', true); }
+
+async function storageInfo() {
+  let s = `Armazenamento: ${store.kind}`;
+  try {
+    if (navigator.storage && navigator.storage.estimate) {
+      const e = await navigator.storage.estimate();
+      s += ` — usado ${(e.usage / 1048576).toFixed(1)} MB de ${(e.quota / 1048576).toFixed(0)} MB`;
+    }
+  } catch (e) { /* ignora */ }
+  return s;
+}
+
+async function showSlots(mode) {
   $('#slotsTitle').textContent = mode === 'save' ? 'Salvar jogo' : 'Carregar jogo';
-  let html = '<table><tr><th>Slot</th><th>Clube</th><th>Temporada/Rodada</th><th>Caixa</th><th>Salvo em</th><th></th></tr>';
-  for (let n = 1; n <= SLOTS; n++) {
-    const m = localStorage.getItem(slotKey(n)) ? (slotMeta(n) || { team: '?' }) : null;
-    html += `<tr><td>${n}</td><td>${m ? esc(m.team) : '<i>(vazio)</i>'}</td><td>${m ? `T${m.season} / R${m.round}` : ''}</td><td>${m && m.budget != null ? money(m.budget) : ''}</td><td>${m ? esc(m.date || '') : ''}</td><td>
-      ${mode === 'save' ? `<button data-save="${n}">Salvar aqui</button>` : `<button data-load="${n}" ${m ? '' : 'disabled'}>Carregar</button>`}
+  let html = `<p><small>${esc(await storageInfo())}</small> &nbsp; <label><input type="checkbox" id="autoPref" ${autosaveOn() ? 'checked' : ''}> Autosave a cada rodada</label></p>
+    <table><tr><th>Slot</th><th>Clube</th><th>Temporada/Rodada</th><th>Caixa</th><th>Salvo em</th><th></th></tr>`;
+  for (const n of ['auto', 1, 2, 3, 4, 5]) {
+    const m = (await store.get(keyOf(n))) ? ((await slotMeta(n)) || { team: '?' }) : null;
+    const canSave = mode === 'save' && n !== 'auto';
+    html += `<tr><td>${n === 'auto' ? 'Autosave' : n}</td><td>${m ? esc(m.team) : '<i>(vazio)</i>'}</td><td>${m ? `T${m.season} / R${m.round}` : ''}</td><td>${m && m.budget != null ? money(m.budget) : ''}</td><td>${m ? esc(m.date || '') : ''}</td><td>
+      ${canSave ? `<button data-save="${n}">Salvar aqui</button>` : mode === 'load' ? `<button data-load="${n}" ${m ? '' : 'disabled'}>Carregar</button>` : ''}
       ${m ? `<button data-del="${n}">Apagar</button>` : ''}</td></tr>`;
   }
   $('#slotsBody').innerHTML = html + '</table>';
   $('#slots').classList.remove('hidden');
+  $('#autoPref').onchange = (e) => localStorage.setItem('futmanager98_pref_autosave', e.target.checked ? '1' : '0');
+  const slotId = (v) => (v === 'auto' ? 'auto' : +v);
   document.querySelectorAll('[data-save]').forEach((b) => b.onclick = async () => {
-    const n = +b.dataset.save;
-    if (localStorage.getItem(slotKey(n)) && !confirm(`Sobrescrever o slot ${n}?`)) return;
+    const n = slotId(b.dataset.save);
+    if ((await store.get(keyOf(n))) && !confirm(`Sobrescrever o slot ${n}?`)) return;
     if (await saveSlot(n)) $('#slots').classList.add('hidden');
   });
   document.querySelectorAll('[data-load]').forEach((b) => b.onclick = async () => {
-    try { await loadSlot(+b.dataset.load); $('#slots').classList.add('hidden'); flash({ ok: true, msg: 'Jogo carregado.' }); enterGame(); } catch (e) { alert(e); }
+    try { await loadSlot(slotId(b.dataset.load)); $('#slots').classList.add('hidden'); flash({ ok: true, msg: 'Jogo carregado.' }); enterGame(); } catch (e) { alert(e); }
   });
-  document.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => {
-    const n = +b.dataset.del;
-    if (!confirm(`Apagar o slot ${n}?`)) return;
-    localStorage.removeItem(slotKey(n)); localStorage.removeItem(metaKey(n)); showSlots(mode);
+  document.querySelectorAll('[data-del]').forEach((b) => b.onclick = async () => {
+    const n = slotId(b.dataset.del);
+    if (!confirm(`Apagar ${n === 'auto' ? 'o autosave' : 'o slot ' + n}?`)) return;
+    await store.del(keyOf(n)); await store.del(metaOf(n)); showSlots(mode);
   });
 }
 $('#slotsClose').onclick = () => $('#slots').classList.add('hidden');
+
 function enterGame() { $('#start').classList.add('hidden'); $('#main').classList.remove('hidden'); tab = 'clube'; refresh(); }
 $('#btnSave').onclick = () => showSlots('save');
 $('#btnQuit').onclick = () => { if (confirm('Voltar ao menu? Progresso não salvo será perdido.')) showStart(); };
@@ -242,6 +323,7 @@ function finishLive() {
   $('#btnPlay').disabled = false; $('#btnPlay').textContent = '▶ Próxima rodada';
   $('#btnPlay').onclick = () => { render(); };
   setStatus();
+  autosave();
 }
 function setStatus() {
   const m = st.managed;
@@ -360,6 +442,7 @@ function renderFinance() {
 }
 
 await init();
+await initStorage();
 showStart();
 
 // Autoteste opcional: abra index.html?selftest para validar o motor no navegador.
@@ -404,14 +487,30 @@ if (location.search.includes('selftest')) (async () => {
     out.push('contratos=ok');
     if (JSON.parse(game.state()).managed.finance.tv === undefined) throw 'tv';
     const teamName = st.managed.name;
+    if (store.kind !== 'IndexedDB') throw 'IndexedDB indisponível';
     await saveSlot(2);
-    if (slotMeta(2).team !== teamName) throw 'meta do slot';
-    if (!localStorage.getItem(slotKey(2)).startsWith('gz:')) throw 'save não compactado';
+    if ((await slotMeta(2)).team !== teamName) throw 'meta do slot';
+    if (!(await store.get('slot_2')).startsWith('gz:')) throw 'save não compactado';
+    await autosave();
+    if ((await slotMeta('auto')).team !== teamName) throw 'autosave';
     game = new FutManager(1);
     await loadSlot(2);
     if (JSON.parse(game.summary()).team !== teamName) throw 'load slot';
-    localStorage.removeItem(slotKey(2)); localStorage.removeItem(metaKey(2));
+    await store.del('slot_2'); await store.del('meta_2');
     out.push('slots=ok');
+    // simula armazenamento cheio: o autosave deve ser descartado para caber o slot
+    const real = store;
+    const mem = new Map([['autosave', 'x'.repeat(600)], ['autosave_meta', '{}']]);
+    const size = () => [...mem.values()].reduce((a, v) => a + v.length, 0);
+    store = { kind: 'teste', get: async (k) => mem.get(k) ?? null, del: async (k) => { mem.delete(k); },
+      set: async (k, v) => { const old = mem.get(k); mem.set(k, v); if (size() > 1000) { if (old === undefined) mem.delete(k); else mem.set(k, old); const e = new Error('cheio'); e.name = 'QuotaExceededError'; throw e; } } };
+    await putWithPrune('slot_3', 'y'.repeat(500), { team: 't' });
+    if (mem.has('autosave') || !mem.has('slot_3')) throw 'poda do autosave';
+    let full = false;
+    try { await putWithPrune('slot_4', 'z'.repeat(900), { team: 't' }); } catch (e) { full = e instanceof StorageFullError; }
+    if (!full) throw 'aviso de espaço';
+    store = real;
+    out.push('armazenamento=ok');
     out.push('rodada_apos_load=' + JSON.parse(game.state()).round);
     for (let i = 0; i < 29; i++) game.play_round();
     out.push('temporada=' + JSON.parse(game.state()).season);
