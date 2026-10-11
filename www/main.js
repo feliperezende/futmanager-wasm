@@ -65,8 +65,8 @@ function renderClub() {
       <button id="btnAuto">Escalação automática</button> <button id="btnSaveLineup">Confirmar escalação</button>
       <span id="lineupInfo"></span> &nbsp; Moral do elenco: ${moraleIcon(m.morale)}
     </fieldset>
-    <div class="list"><table><tr><th>Tit.</th><th>Pos</th><th>Nome</th><th>Hab.</th><th>Idade</th><th>Salário/rod.</th><th>Valor</th><th>Gols</th><th>Moral</th><th></th></tr>
-    ${squad.map((p) => `<tr><td><input type="checkbox" data-id="${p.id}" ${selected.includes(p.id) ? 'checked' : ''}></td>${playerRow(p, `<td>${p.goals}</td><td>${moraleIcon(p.morale)}</td><td>${p.loanFrom ? `<small>Emprestado pelo ${esc(p.loanFrom)}</small>` : `<button data-sell="${p.id}">Vender (${money(p.sellPrice)})</button> <button data-loanout="${p.id}">Emprestar</button>`}</td>`)}</tr>`).join('')}
+    <div class="list"><table><tr><th>Tit.</th><th>Pos</th><th>Nome</th><th>Hab.</th><th>Idade</th><th>Salário/rod.</th><th>Valor</th><th>Gols</th><th>Moral</th><th>Contrato</th><th></th></tr>
+    ${squad.map((p) => `<tr><td><input type="checkbox" data-id="${p.id}" ${selected.includes(p.id) ? 'checked' : ''}></td>${playerRow(p, `<td>${p.goals}</td><td>${moraleIcon(p.morale)}</td><td style="${p.contractUntil <= st.season ? 'color:#c00;font-weight:bold' : ''}">${p.loanFrom ? '—' : 'até T' + p.contractUntil}</td><td>${p.loanFrom ? `<small>Emprestado pelo ${esc(p.loanFrom)}</small>` : `<button data-sell="${p.id}">Vender (${money(p.sellPrice)})</button> <button data-loanout="${p.id}">Emprestar</button> <button data-renew="${p.id}">Renovar</button>`}</td>`)}</tr>`).join('')}
     </table></div>`;
   const info = () => {
     const ps = m.squad.filter((p) => selected.includes(p.id));
@@ -81,6 +81,15 @@ function renderClub() {
   });
   $('#btnAuto').onclick = () => { flash(JSON.parse(game.auto_lineup($('#formation').value))); refresh(); };
   $('#btnSaveLineup').onclick = () => { const r = JSON.parse(game.set_lineup($('#formation').value, JSON.stringify(selected))); flash(r); if (r.ok) refresh(); };
+  document.querySelectorAll('[data-renew]').forEach((b) => b.onclick = () => {
+    const id = +b.dataset.renew;
+    const years = parseInt(prompt('Duração do novo contrato (1 a 5 temporadas):', '3'), 10);
+    if (!years) return;
+    const demand = +game.wage_demand(id, years);
+    const offer = prompt(`O jogador pede cerca de ${money(demand)} por rodada. Qual a sua oferta (R$/rodada)?`, String(demand));
+    if (offer === null) return;
+    flash(JSON.parse(game.renew(id, years, +offer))); refresh();
+  });
   document.querySelectorAll('[data-loanout]').forEach((b) => b.onclick = () => {
     if (confirm('Emprestar este jogador até o fim da temporada?')) { flash(JSON.parse(game.loan_out(+b.dataset.loanout))); refresh(); }
   });
@@ -287,6 +296,12 @@ if (location.search.includes('selftest')) {
     const lr = JSON.parse(game.loan_in(cand.id));
     if (!lr.ok) throw 'empréstimo: ' + lr.msg;
     out.push('emprestimos=ok');
+    const pl = JSON.parse(game.state()).managed.squad.find((p) => !p.loanFrom);
+    const dem = +game.wage_demand(pl.id, 2);
+    if (JSON.parse(game.renew(pl.id, 2, Math.floor(dem / 3))).ok) throw 'renovação barata aceita';
+    const rn = JSON.parse(game.renew(pl.id, 2, +game.wage_demand(pl.id, 2)));
+    if (!rn.ok) throw 'renovação: ' + rn.msg;
+    out.push('contratos=ok');
     localStorage.setItem(SAVE_KEY, game.save());
     game = FutManager.load(localStorage.getItem(SAVE_KEY));
     out.push('rodada_apos_load=' + JSON.parse(game.state()).round);

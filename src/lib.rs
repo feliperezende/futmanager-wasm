@@ -62,7 +62,16 @@ pub struct Player {
     /// Clube dono do passe, quando o jogador está emprestado
     #[serde(default)]
     pub loan_from: Option<usize>,
+    /// Última temporada do contrato (0 = sem contrato)
+    #[serde(default)]
+    pub contract_until: u32,
+    /// Propostas de renovação recusadas nesta temporada
+    #[serde(default)]
+    pub refusals: u8,
 }
+
+pub const MAX_CONTRACT_YEARS: u32 = 5;
+pub const MAX_REFUSALS: u8 = 3;
 
 fn default_morale() -> i32 { 50 }
 
@@ -235,6 +244,7 @@ impl Game {
         let mut g = Game { rng, season: 1, round: 0, teams, players, schedule: vec![], managed: None,
             finance: Finance::default(), news: vec![], last_results: vec![], live: vec![] };
         g.refill_free_agents();
+        for i in 0..g.players.len() { if g.players[i].team.is_some() { g.players[i].contract_until = 1 + g.rng.range(0, 3) as u32; } }
         for t in 0..g.teams.len() { for _ in 0..2 { g.gen_prospect(t); } }
         g.build_schedule();
         for t in 0..g.teams.len() { g.auto_lineup(t); }
@@ -244,7 +254,7 @@ impl Game {
     fn gen_player(rng: &mut Rng, id: usize, pos: Pos, base: i32, team: Option<usize>) -> Player {
         let skill = (base + rng.range(-10, 10) as i32).clamp(15, 95);
         Player { id, name: gen_player_name(rng), pos, skill, age: rng.range(17, 34) as i32, salary: salary_for(skill), team, goals: 0,
-            yellows: 0, suspended: 0, injured: 0, morale: 50, academy: false, loan_from: None }
+            yellows: 0, suspended: 0, injured: 0, morale: 50, academy: false, loan_from: None, contract_until: 0, refusals: 0 }
     }
 
     fn refill_free_agents(&mut self) {
@@ -291,14 +301,14 @@ impl Game {
         if self.players.get(id).map(|p| p.team == Some(team) && p.academy) != Some(true) { return Err("Jogador não está na sua base".into()); }
         if self.squad(team).len() >= MAX_SQUAD { return Err(format!("Elenco cheio (máx. {})", MAX_SQUAD)); }
         let p = &mut self.players[id];
-        p.academy = false; p.salary = salary_for(p.skill); p.morale = 70;
+        p.academy = false; p.salary = salary_for(p.skill); p.morale = 70; p.contract_until = self.season + 3;
         Ok(format!("{} promovido ao time profissional", p.name))
     }
 
     pub fn release_youth(&mut self, team: usize, id: usize) -> Result<String, String> {
         if self.players.get(id).map(|p| p.team == Some(team) && p.academy) != Some(true) { return Err("Jogador não está na sua base".into()); }
         let p = &mut self.players[id];
-        p.academy = false; p.team = None; p.salary = salary_for(p.skill);
+        p.academy = false; p.team = None; p.salary = salary_for(p.skill); p.contract_until = 0;
         Ok(format!("{} dispensado da base", p.name))
     }
 
@@ -768,6 +778,7 @@ impl Game {
         let tables: Vec<Vec<usize>> = (0..DIVISIONS).map(|d| self.table(d)).collect();
         let mut news = vec![format!("Fim da temporada {}!", self.season)];
         self.return_loans(&mut news);
+        self.expire_contracts(&mut news);
         for d in 0..DIVISIONS {
             news.push(format!("Campeão da Divisão {}: {}", d + 1, self.teams[tables[d][0]].name));
             for (pos, &t) in tables[d].iter().enumerate() {
@@ -791,7 +802,8 @@ impl Game {
             let p = &mut self.players[i];
             p.age += 1; p.goals = 0;
             p.skill = (p.skill + delta).clamp(10, 99);
-            p.salary = salary_for(p.skill);
+            if p.team.is_none() { p.salary = salary_for(p.skill); }
+            p.refusals = 0;
         }
         // aposentadorias com reposição por jovens da base
         for i in 0..self.players.len() {
@@ -836,8 +848,8 @@ impl Game {
         self.teams[buyer].budget -= price;
         if let Some(s) = seller { self.teams[s].budget += price; self.teams[s].lineup.retain(|&x| x != id); }
         if Some(buyer) == self.managed { self.finance.transfers_out += price; }
-        self.players[id].team = Some(buyer);
         self.players[id].morale = 65;
+        self.sign(buyer, id, 3);
         Ok(format!("{} contratado por R$ {}", self.players[id].name, price))
     }
 
@@ -860,12 +872,20 @@ impl Game {
     /// IA: clubes com elenco curto contratam livres; ocasionalmente algum clube compra um reforço.
     fn ai_transfers(&mut self) {
         for t in 0..self.teams.len() {
-            if Some(t) == self.managed { continue; }
-            while self.squad(t).len() < 16 {
-                let best = self.players.iter().filter(|p| p.team.is_none()).max_by_key(|p| p.skill).map(|p| p.id);
-                match best { Some(id) => { self.teams[t].budget -= self.buy_price(id); self.players[id].team = Some(t); } None => break }
+            let min = if Some(t) == self.managed { 13 } else { 16 };
+            while self.squad(t).len() < min {
+                // contrata o melhor livre que couber no bolso (ou o mais barato)
+                let budget = self.teams[t].budget;
+                let free: Vec<usize> = self.players.iter().filter(|p| p.team.is_none()).map(|p| p.id).collect();
+                let best = free.iter().copied().filter(|&id| self.buy_price(id) <= budget / 4).max_by_key(|&id| self.players[id].skill)
+                    .or_else(|| free.iter().copied().min_by_key(|&id| self.buy_price(id)));
+                let Some(id) = best else { break };
+                self.teams[t].budget -= self.buy_price(id);
+                if Some(t) == self.managed { self.finance.transfers_out += self.buy_price(id); self.news.push(format!("Elenco curto: a diretoria contratou {} (livre)", self.players[id].name)); }
+                self.sign(t, id, 2);
             }
         }
+
         if self.rng.f64() < 0.5 {
             let t = self.rng.range(0, self.teams.len() as i64 - 1) as usize;
             if Some(t) != self.managed && self.squad(t).len() < 24 {
@@ -877,13 +897,88 @@ impl Game {
         }
     }
 
+    /// Assina contrato com o salário pedido.
+    fn sign(&mut self, team: usize, id: usize, years: u32) {
+        let wage = self.wage_demand(id, years, Some(team));
+        let season = self.season;
+        let p = &mut self.players[id];
+        p.team = Some(team); p.salary = wage; p.contract_until = season + years; p.refusals = 0;
+    }
+
+    /// Salário pedido por rodada para um contrato de `years` temporadas.
+    pub fn wage_demand(&self, id: usize, years: u32, team: Option<usize>) -> i64 {
+        let p = &self.players[id];
+        let mut f = 1.2 - p.morale.clamp(0, 100) as f64 / 250.0; // 0.8 .. 1.2
+        let extra = years.saturating_sub(1) as f64;
+        f *= if p.age >= 30 { 1.0 + 0.06 * extra } else if p.age <= 24 { 1.0 - 0.02 * extra } else { 1.0 };
+        f *= 1.0 + 0.07 * p.refusals as f64;
+        // clubes de divisões mais altas pagam mais
+        if let Some(t) = team { f *= [1.25, 1.1, 1.0, 0.9][self.teams[t].division]; }
+        ((salary_for(p.skill) as f64 * f / 1000.0).round() as i64).max(1) * 1000
+    }
+
+    /// Proposta de renovação. Se recusada, devolve a contraproposta.
+    pub fn renew(&mut self, team: usize, id: usize, years: u32, wage: i64) -> Result<String, String> {
+        let p = self.players.get(id).ok_or("Jogador inexistente")?;
+        if p.team != Some(team) || p.academy || p.loan_from.is_some() { return Err("Só é possível renovar com jogadores do seu elenco".into()); }
+        if !(1..=MAX_CONTRACT_YEARS).contains(&years) { return Err(format!("Contrato de 1 a {MAX_CONTRACT_YEARS} temporadas")); }
+        if p.refusals >= MAX_REFUSALS { return Err(format!("{} não quer mais negociar nesta temporada", p.name)); }
+        let demand = self.wage_demand(id, years, Some(team));
+        let season = self.season;
+        let p = &mut self.players[id];
+        if wage >= demand {
+            p.salary = wage; p.contract_until = season + years; p.refusals = 0;
+            Ok(format!("{} renovou até a temporada {} por R$ {}/rodada", p.name, p.contract_until, wage))
+        } else {
+            p.refusals += 1;
+            p.morale = (p.morale - 3).max(0);
+            if p.refusals >= MAX_REFUSALS { Err(format!("{} recusou e encerrou as negociações nesta temporada", p.name)) }
+            else { Err(format!("{} recusou. Pede pelo menos R$ {}/rodada (tentativas restantes: {})", p.name, demand, MAX_REFUSALS - p.refusals)) }
+        }
+    }
+
+    /// Contratos que terminam nesta temporada: IA renova os úteis; o clube do usuário perde quem não renovou.
+    fn expire_contracts(&mut self, news: &mut Vec<String>) {
+        for id in 0..self.players.len() {
+            let p = &self.players[id];
+            let Some(t) = p.team else { continue };
+            if p.academy || p.contract_until > self.season { continue; }
+            if Some(t) == self.managed {
+                news.push(format!("Contrato encerrado: {} deixa o clube", p.name));
+                let p = &mut self.players[id];
+                p.team = None; p.contract_until = 0; p.salary = salary_for(p.skill);
+                self.teams[t].lineup.retain(|&x| x != id);
+            } else {
+                let mut skills: Vec<i32> = self.squad(t).iter().map(|&i| self.players[i].skill).collect();
+                skills.sort();
+                let median = skills.get(skills.len() / 2).copied().unwrap_or(0);
+                let keep = (p.skill >= median - 3 && p.age < 33) || self.squad(t).len() <= 16;
+                if keep {
+                    let years = self.rng.range(1, 3) as u32;
+                    self.sign(t, id, years);
+                } else {
+                    let p = &mut self.players[id];
+                    p.team = None; p.contract_until = 0; p.salary = salary_for(p.skill);
+                    self.teams[t].lineup.retain(|&x| x != id);
+                }
+            }
+        }
+    }
+
+    /// Ajustes após carregar saves de versões antigas.
+    pub fn normalize(&mut self) {
+        let s = self.season;
+        for p in self.players.iter_mut() { if p.team.is_some() && !p.academy && p.contract_until == 0 { p.contract_until = s + 1; } }
+    }
+
     // ------------------------------------------------ JSON para a interface
     fn player_json(&self, p: &Player) -> serde_json::Value {
         serde_json::json!({"id": p.id, "name": p.name, "pos": p.pos.label(), "skill": p.skill, "age": p.age, "salary": p.salary,
             "value": player_value(p), "team": p.team, "teamName": p.team.map(|t| self.teams[t].name.clone()).unwrap_or("Sem clube".into()),
             "goals": p.goals, "buyPrice": self.buy_price(p.id), "sellPrice": self.sell_price(p.id),
             "yellows": p.yellows, "suspended": p.suspended, "injured": p.injured, "morale": p.morale,
-            "loanFee": self.loan_fee(p.id), "loanFrom": p.loan_from.map(|t| self.teams[t].name.clone())})
+            "loanFee": self.loan_fee(p.id), "loanFrom": p.loan_from.map(|t| self.teams[t].name.clone()),
+            "contractUntil": p.contract_until, "refusals": p.refusals})
     }
 
     /// Estado das partidas ao vivo de uma divisão.
@@ -948,7 +1043,7 @@ impl FutManager {
     #[wasm_bindgen(constructor)]
     pub fn new(seed: f64) -> FutManager { FutManager { g: Game::new(seed as u64) } }
     pub fn load(json: &str) -> Result<FutManager, JsValue> {
-        serde_json::from_str::<Game>(json).map(|g| FutManager { g }).map_err(|e| JsValue::from_str(&format!("Save inválido: {e}")))
+        serde_json::from_str::<Game>(json).map(|mut g| { g.normalize(); FutManager { g } }).map_err(|e| JsValue::from_str(&format!("Save inválido: {e}")))
     }
     pub fn save(&self) -> String { serde_json::to_string(&self.g).unwrap() }
     pub fn state(&self) -> String { self.g.state_json().to_string() }
@@ -1001,6 +1096,12 @@ impl FutManager {
     pub fn sell(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.sell(m, id)), None => res(Err("Nenhum time".into())) } }
     pub fn promote_youth(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.promote_youth(m, id)), None => res(Err("Nenhum time".into())) } }
     pub fn release_youth(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.release_youth(m, id)), None => res(Err("Nenhum time".into())) } }
+    /// Salário pedido (JSON) para renovar/contratar por `years` temporadas.
+    pub fn wage_demand(&self, id: usize, years: u32) -> String {
+        if id >= self.g.players.len() { return "0".into(); }
+        self.g.wage_demand(id, years, self.g.managed).to_string()
+    }
+    pub fn renew(&mut self, id: usize, years: u32, wage: f64) -> String { match self.g.managed { Some(m) => res(self.g.renew(m, id, years, wage as i64)), None => res(Err("Nenhum time".into())) } }
     pub fn loan_in(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.loan_in(m, id)), None => res(Err("Nenhum time".into())) } }
     pub fn loan_out(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.loan_out(m, id)), None => res(Err("Nenhum time".into())) } }
     pub fn take_bank_loan(&mut self, amount: f64) -> String { match self.g.managed { Some(m) => res(self.g.take_bank_loan(m, amount as i64)), None => res(Err("Nenhum time".into())) } }
@@ -1349,7 +1450,44 @@ mod tests {
     }
 
     #[test]
+    fn contracts_negotiation_and_expiry() {
+        let mut g = Game::new(81);
+        g.managed = Some(6);
+        let sq = g.squad(6);
+        let p = sq[0];
+        assert!(g.players.iter().filter(|p| p.team.is_some() && !p.academy).all(|p| (1..=4).contains(&p.contract_until)));
+        let demand = g.wage_demand(p, 3, Some(6));
+        let err = g.renew(6, p, 3, demand / 2).unwrap_err();
+        assert!(err.contains("Pede"), "{err}");
+        assert!(g.wage_demand(p, 3, Some(6)) > demand, "recusa encarece a pedida");
+        assert!(g.renew(6, p, 9, demand * 10).is_err(), "duração inválida");
+        let d2 = g.wage_demand(p, 3, Some(6));
+        g.renew(6, p, 3, d2).unwrap();
+        assert_eq!(g.players[p].contract_until, g.season + 3);
+        assert_eq!(g.players[p].salary, d2);
+        // três recusas encerram a negociação
+        let q = sq[1];
+        for _ in 0..3 { let _ = g.renew(6, q, 1, 1000); }
+        assert!(g.renew(6, q, 1, 100_000_000).unwrap_err().contains("não quer"));
+        // habilidade maior => pedida maior
+        let mut sorted = sq.clone();
+        sorted.sort_by_key(|&i| g.players[i].skill);
+        let (lo, hi) = (sorted[2], sorted[sorted.len() - 1]);
+        g.players[lo].morale = 50; g.players[hi].morale = 50; g.players[lo].refusals = 0; g.players[hi].refusals = 0;
+        if g.players[hi].skill > g.players[lo].skill + 5 { assert!(g.wage_demand(hi, 2, Some(6)) > g.wage_demand(lo, 2, Some(6))); }
+        // expiração no fim da temporada
+        let leaving = sq[2];
+        g.players[leaving].contract_until = 1;
+        for _ in 0..ROUNDS { g.play_round(); }
+        assert_ne!(g.players[leaving].team, Some(6));
+        assert_eq!(g.players[p].team, Some(6));
+        assert!(g.players.iter().filter(|p| p.team.is_some() && !p.academy).all(|p| p.contract_until >= g.season));
+        for t in 0..g.teams.len() { if t != 6 { assert!(g.squad(t).len() >= MIN_SQUAD, "time {t} ficou com elenco curto"); } }
+    }
+
+    #[test]
     fn save_load_roundtrip() {
+
 
 
 
