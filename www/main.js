@@ -340,7 +340,8 @@ function renderFinance() {
     <tr><td><b>Caixa atual</b></td><td><b>${money(m.budget)}</b></td></tr>
   </table></div><div><fieldset><legend>Estádio</legend>
     Capacidade: ${m.capacity.toLocaleString('pt-BR')} lugares<br>Folha salarial por rodada: ${money(m.wageBill)}<br><br>
-    Preço do ingresso: <input id="tprice" type="number" min="1" max="500" value="${m.ticketPrice}"> <button id="tsave">Alterar</button><br>
+    Preço do ingresso: <input id="tprice" type="number" min="${m.ticketRange[0]}" max="${m.ticketRange[1]}" value="${m.ticketPrice}"> <button id="tsave">Alterar</button>
+    <small>(faixa: ${money(m.ticketRange[0])} a ${money(m.ticketRange[1])}; o preço é mantido entre temporadas)</small><br>
     Público esperado no próximo jogo em casa: ~${m.expectedAttendance.toLocaleString('pt-BR')}<br>
     Manutenção do estádio: ${money(m.stadiumUpkeep)} por rodada
   </fieldset><fieldset><legend>Banco</legend>
@@ -388,6 +389,8 @@ if (location.search.includes('selftest')) (async () => {
     const fin = JSON.parse(game.state()).managed;
     if (fin.expectedAttendance <= 0 || fin.stadiumOptions.length !== 3) throw 'estádio';
     out.push('estadio=ok');
+    const tr = JSON.parse(game.set_ticket_price(9999));
+    if (JSON.parse(game.state()).managed.ticketPrice !== fin.ticketRange[1]) throw 'faixa de ingresso: ' + tr.msg;
     if (!JSON.parse(game.take_bank_loan(100000)).ok) throw 'banco';
     const cand = JSON.parse(game.market('', 1e12)).filter((p) => p.team !== null).sort((a, b) => a.loanFee - b.loanFee)[0];
     const lr = JSON.parse(game.loan_in(cand.id));

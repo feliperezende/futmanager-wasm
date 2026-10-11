@@ -992,6 +992,7 @@ impl Game {
 
     pub fn end_season(&mut self) {
         let tables: Vec<Vec<usize>> = (0..DIVISIONS).map(|d| self.table(d)).collect();
+        let old_div: Vec<usize> = self.teams.iter().map(|t| t.division).collect();
         let mut news = vec![format!("Fim da temporada {}!", self.season)];
         self.return_loans(&mut news);
         self.expire_contracts(&mut news);
@@ -1040,7 +1041,14 @@ impl Game {
                 self.players[i] = Self::gen_player(&mut self.rng, i, pos, b, None);
             }
         }
-        for t in &mut self.teams { t.stats = Stats::default(); t.capacity = t.capacity.max(DIV_CAPACITY[t.division] / 2); t.ticket_price = DIV_TICKET[t.division]; }
+        for (i, t) in self.teams.iter_mut().enumerate() {
+            t.stats = Stats::default();
+            t.capacity = t.capacity.max(DIV_CAPACITY[t.division] / 2);
+            // o preço do ingresso é mantido; ao mudar de divisão, é ajustado proporcionalmente e limitado à faixa da nova divisão
+            let scaled = t.ticket_price * DIV_TICKET[t.division] / DIV_TICKET[old_div[i]];
+            let (lo, hi) = Self::ticket_range(t.division);
+            t.ticket_price = scaled.clamp(lo, hi);
+        }
         self.academy_season(&mut news);
         self.refill_free_agents();
         self.season += 1;
@@ -1244,7 +1252,7 @@ impl Game {
         let managed = self.managed.map(|m| {
             let t = &self.teams[m];
             serde_json::json!({"id": m, "name": t.name, "division": t.division, "budget": t.budget, "capacity": t.capacity, "morale": self.team_morale(m),
-                "ticketPrice": t.ticket_price, "formation": t.formation, "lineup": t.lineup,
+                "ticketPrice": t.ticket_price, "ticketRange": Self::ticket_range(t.division), "formation": t.formation, "lineup": t.lineup,
                 "squad": self.squad(m).iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>(),
                 "wageBill": self.squad(m).iter().map(|&id| self.players[id].salary).sum::<i64>(), "finance": self.finance,
                 "construction": t.construction, "stadiumUpkeep": self.stadium_upkeep(m), "expectedAttendance": self.demand(m).min(t.capacity as f64) as i64,
@@ -1326,6 +1334,13 @@ impl Game {
         self.auto_lineup(t);
     }
 
+    pub fn set_ticket_price(&mut self, team: usize, price: i64) -> Result<String, String> {
+        let (lo, hi) = Self::ticket_range(self.teams[team].division);
+        let p = price.clamp(lo, hi);
+        self.teams[team].ticket_price = p;
+        Ok(if p != price { format!("Preço ajustado para R$ {p} (faixa da divisão: R$ {lo} a R$ {hi})") } else { format!("Preço do ingresso: R$ {p}") })
+    }
+
     /// Faixa de preço de ingresso aceita para uma divisão.
     pub fn ticket_range(div: usize) -> (i64, i64) { (DIV_TICKET[div] / 2, DIV_TICKET[div] * 3) }
 
@@ -1402,8 +1417,7 @@ impl FutManager {
     }
     pub fn set_ticket_price(&mut self, price: f64) -> String {
         let Some(m) = self.g.managed else { return res(Err("Nenhum time".into())) };
-        self.g.teams[m].ticket_price = (price as i64).clamp(1, 500);
-        res(Ok("Preço do ingresso atualizado".into()))
+        res(self.g.set_ticket_price(m, price as i64))
     }
     /// Inicia a rodada ao vivo; avance com `step` e finalize com `finish_round`.
     pub fn start_round(&mut self) -> String { self.g.start_round(); self.live() }
@@ -1996,7 +2010,29 @@ mod tests {
     }
 
     #[test]
+    fn ticket_price_persists_across_seasons() {
+        let mut g = Game::new(121);
+        // um time que fica, um que sobe e um que cai
+        g.managed = Some(0);
+        for t in 0..g.teams.len() { let (lo, hi) = Game::ticket_range(g.teams[t].division); g.teams[t].ticket_price = (lo + hi) / 2 + 1; }
+        g.set_ticket_price(0, 1).unwrap();
+        assert_eq!(g.teams[0].ticket_price, Game::ticket_range(g.teams[0].division).0, "limitado à faixa");
+        g.set_ticket_price(0, 55).unwrap();
+        let before: Vec<(usize, i64)> = g.teams.iter().map(|t| (t.division, t.ticket_price)).collect();
+        for _ in 0..ROUNDS { g.play_round(); }
+        for (i, t) in g.teams.iter().enumerate() {
+            let (od, op) = before[i];
+            let (lo, hi) = Game::ticket_range(t.division);
+            assert!(t.ticket_price >= lo && t.ticket_price <= hi);
+            if od == t.division { assert_eq!(t.ticket_price, op, "preço mantido"); }
+            else { assert_eq!(t.ticket_price, (op * DIV_TICKET[t.division] / DIV_TICKET[od]).clamp(lo, hi), "preço ajustado na troca de divisão"); }
+        }
+        assert!(g.teams.iter().enumerate().any(|(i, t)| t.division != before[i].0));
+    }
+
+    #[test]
     fn save_summary() {
+
 
         let mut g = Game::new(101);
         assert_eq!(g.summary_json()["team"], "Desempregado");
