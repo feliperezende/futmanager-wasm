@@ -43,7 +43,7 @@ function render() {
   document.querySelectorAll('.tab').forEach((s) => s.classList.add('hidden'));
   document.querySelectorAll('.menubar [data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
   $('#tab-' + tab).classList.remove('hidden');
-  ({ clube: renderClub, jogos: renderRound, tabela: renderTable, mercado: renderMarket, financas: renderFinance })[tab]();
+  ({ clube: renderClub, jogos: renderRound, tabela: renderTable, mercado: renderMarket, base: renderAcademy, financas: renderFinance })[tab]();
 }
 
 function moraleIcon(v) { return (v >= 70 ? '😃' : v >= 45 ? '🙂' : v >= 25 ? '😐' : '😠') + ' ' + v; }
@@ -197,9 +197,24 @@ function renderMarket() {
   document.querySelectorAll('[data-buy]').forEach((b) => b.onclick = () => { flash(JSON.parse(game.buy(+b.dataset.buy))); refresh(); });
 }
 
+function renderAcademy() {
+  const m = st.managed;
+  $('#tab-base').innerHTML = `<fieldset><legend>Categorias de base — nível ${m.academyLevel}/5</legend>
+    Custo de manutenção: ${money(m.academyUpkeep)} por rodada.
+    ${m.academyLevel < 5 ? `<button id="btnAcad">Melhorar base (${money(m.academyUpgradeCost)})</button>` : '(nível máximo)'}
+    <br><small>Novos jovens surgem a cada fim de temporada; quanto maior o nível, mais e melhores talentos. Jovens deixam a base aos 20 anos.</small></fieldset>
+    <table><tr><th>Pos</th><th>Nome</th><th>Hab.</th><th>Idade</th><th></th></tr>
+    ${m.academy.map((p) => `<tr><td class="pos-${p.pos}">${p.pos}</td><td>${esc(p.name)}</td><td>${p.skill}</td><td>${p.age}</td>
+      <td><button data-promote="${p.id}">Promover ao profissional</button> <button data-release="${p.id}">Dispensar</button></td></tr>`).join('') || '<tr><td colspan="5">Nenhum jogador na base.</td></tr>'}
+    </table>`;
+  if ($('#btnAcad')) $('#btnAcad').onclick = () => { flash(JSON.parse(game.upgrade_academy())); refresh(); };
+  document.querySelectorAll('[data-promote]').forEach((b) => b.onclick = () => { flash(JSON.parse(game.promote_youth(+b.dataset.promote))); refresh(); });
+  document.querySelectorAll('[data-release]').forEach((b) => b.onclick = () => { if (confirm('Dispensar este jovem?')) { flash(JSON.parse(game.release_youth(+b.dataset.release))); refresh(); } });
+}
+
 function renderFinance() {
   const m = st.managed, f = m.finance;
-  const bal = f.tickets + f.transfers_in + f.prizes - f.salaries - f.transfers_out;
+  const bal = f.tickets + f.transfers_in + f.prizes - f.salaries - f.transfers_out - f.upkeep - f.investments;
   $('#tab-financas').innerHTML = `<div class="cols"><div><table>
     <tr><th colspan="2">Temporada ${st.season}</th></tr>
     <tr><td>Bilheteria</td><td>${money(f.tickets)}</td></tr>
@@ -207,6 +222,8 @@ function renderFinance() {
     <tr><td>Premiações</td><td>${money(f.prizes)}</td></tr>
     <tr><td>Salários pagos</td><td>-${money(f.salaries)}</td></tr>
     <tr><td>Compras de jogadores</td><td>-${money(f.transfers_out)}</td></tr>
+    <tr><td>Manutenção (base/estádio)</td><td>-${money(f.upkeep)}</td></tr>
+    <tr><td>Investimentos</td><td>-${money(f.investments)}</td></tr>
     <tr><td><b>Saldo da temporada</b></td><td><b>${money(bal)}</b></td></tr>
     <tr><td><b>Caixa atual</b></td><td><b>${money(m.budget)}</b></td></tr>
   </table></div><div><fieldset><legend>Estádio</legend>
@@ -239,6 +256,9 @@ if (location.search.includes('selftest')) {
     out.push('jogos=' + r.length);
     const mk = JSON.parse(game.market('', 1e12));
     out.push('mercado=' + mk.length);
+    const ac = JSON.parse(game.state()).managed.academy;
+    if (!JSON.parse(game.promote_youth(ac[0].id)).ok) throw 'promoção falhou';
+    out.push('base=ok');
     localStorage.setItem(SAVE_KEY, game.save());
     game = FutManager.load(localStorage.getItem(SAVE_KEY));
     out.push('rodada_apos_load=' + JSON.parse(game.state()).round);

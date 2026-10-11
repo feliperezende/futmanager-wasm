@@ -56,6 +56,9 @@ pub struct Player {
     /// Moral 0..100 (50 = normal). Afeta o rendimento em ±10%.
     #[serde(default = "default_morale")]
     pub morale: i32,
+    /// Jogador das categorias de base (não conta no elenco profissional)
+    #[serde(default)]
+    pub academy: bool,
 }
 
 fn default_morale() -> i32 { 50 }
@@ -105,7 +108,14 @@ pub struct Team {
     pub formation: String,
     pub lineup: Vec<usize>,
     pub stats: Stats,
+    /// Nível das categorias de base (1..=5)
+    #[serde(default = "one")]
+    pub academy_level: u8,
 }
+
+fn one() -> u8 { 1 }
+pub const MAX_ACADEMY_LEVEL: u8 = 5;
+pub const MAX_ACADEMY: usize = 8;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Event { pub minute: u32, pub side: u8, pub kind: String, pub text: String }
@@ -122,7 +132,8 @@ pub struct MatchResult {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct Finance { pub tickets: i64, pub salaries: i64, pub transfers_in: i64, pub transfers_out: i64, pub prizes: i64 }
+pub struct Finance { pub tickets: i64, pub salaries: i64, pub transfers_in: i64, pub transfers_out: i64, pub prizes: i64,
+    #[serde(default)] pub upkeep: i64, #[serde(default)] pub investments: i64 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Game {
@@ -189,7 +200,7 @@ impl Game {
                 let base = DIV_BASE_SKILL[div] + rng.range(-5, 5) as i32;
                 teams.push(Team { id, name, division: div, budget: DIV_BUDGET[div] + rng.range(0, 10) * DIV_BUDGET[div] / 20,
                     capacity: DIV_CAPACITY[div] * rng.range(70, 130) / 100, ticket_price: DIV_TICKET[div],
-                    formation: rng.pick(&FORMATIONS).to_string(), lineup: vec![], stats: Stats::default() });
+                    formation: rng.pick(&FORMATIONS).to_string(), lineup: vec![], stats: Stats::default(), academy_level: 1 });
                 for (pos, n) in [(Pos::G, 2), (Pos::D, 6), (Pos::M, 6), (Pos::A, 4)] {
                     for _ in 0..n { let p = Self::gen_player(&mut rng, players.len(), pos, base, Some(id)); players.push(p); }
                 }
@@ -198,6 +209,7 @@ impl Game {
         let mut g = Game { rng, season: 1, round: 0, teams, players, schedule: vec![], managed: None,
             finance: Finance::default(), news: vec![], last_results: vec![], live: vec![] };
         g.refill_free_agents();
+        for t in 0..g.teams.len() { for _ in 0..2 { g.gen_prospect(t); } }
         g.build_schedule();
         for t in 0..g.teams.len() { g.auto_lineup(t); }
         g
@@ -206,7 +218,7 @@ impl Game {
     fn gen_player(rng: &mut Rng, id: usize, pos: Pos, base: i32, team: Option<usize>) -> Player {
         let skill = (base + rng.range(-10, 10) as i32).clamp(15, 95);
         Player { id, name: gen_player_name(rng), pos, skill, age: rng.range(17, 34) as i32, salary: salary_for(skill), team, goals: 0,
-            yellows: 0, suspended: 0, injured: 0, morale: 50 }
+            yellows: 0, suspended: 0, injured: 0, morale: 50, academy: false }
     }
 
     fn refill_free_agents(&mut self) {
@@ -219,7 +231,78 @@ impl Game {
         }
     }
 
-    pub fn squad(&self, team: usize) -> Vec<usize> { self.players.iter().filter(|p| p.team == Some(team)).map(|p| p.id).collect() }
+    pub fn squad(&self, team: usize) -> Vec<usize> { self.players.iter().filter(|p| p.team == Some(team) && !p.academy).map(|p| p.id).collect() }
+    pub fn academy(&self, team: usize) -> Vec<usize> { self.players.iter().filter(|p| p.team == Some(team) && p.academy).map(|p| p.id).collect() }
+
+    /// Gera um jovem na base do clube; a qualidade depende do nível da base e da divisão.
+    pub fn gen_prospect(&mut self, team: usize) -> usize {
+        let lvl = self.teams[team].academy_level as i32;
+        let base = DIV_BASE_SKILL[self.teams[team].division] - 18 + lvl * 4;
+        let pos = *self.rng.pick(&[Pos::G, Pos::D, Pos::D, Pos::M, Pos::M, Pos::A, Pos::A]);
+        let id = self.players.len();
+        let mut p = Self::gen_player(&mut self.rng, id, pos, base, Some(team));
+        p.age = self.rng.range(16, 17) as i32;
+        p.academy = true;
+        p.salary = 1000;
+        self.players.push(p);
+        id
+    }
+
+    pub fn academy_upgrade_cost(&self, team: usize) -> i64 { 1_000_000 * self.teams[team].academy_level as i64 }
+    pub fn academy_upkeep(&self, team: usize) -> i64 { 8_000 * self.teams[team].academy_level as i64 }
+
+    pub fn upgrade_academy(&mut self, team: usize) -> Result<String, String> {
+        if self.teams[team].academy_level >= MAX_ACADEMY_LEVEL { return Err("A base já está no nível máximo".into()); }
+        let cost = self.academy_upgrade_cost(team);
+        if self.teams[team].budget < cost { return Err("Orçamento insuficiente".into()); }
+        self.teams[team].budget -= cost;
+        self.teams[team].academy_level += 1;
+        if Some(team) == self.managed { self.finance.investments += cost; }
+        Ok(format!("Categorias de base melhoradas para o nível {}", self.teams[team].academy_level))
+    }
+
+    pub fn promote_youth(&mut self, team: usize, id: usize) -> Result<String, String> {
+        if self.players.get(id).map(|p| p.team == Some(team) && p.academy) != Some(true) { return Err("Jogador não está na sua base".into()); }
+        if self.squad(team).len() >= MAX_SQUAD { return Err(format!("Elenco cheio (máx. {})", MAX_SQUAD)); }
+        let p = &mut self.players[id];
+        p.academy = false; p.salary = salary_for(p.skill); p.morale = 70;
+        Ok(format!("{} promovido ao time profissional", p.name))
+    }
+
+    pub fn release_youth(&mut self, team: usize, id: usize) -> Result<String, String> {
+        if self.players.get(id).map(|p| p.team == Some(team) && p.academy) != Some(true) { return Err("Jogador não está na sua base".into()); }
+        let p = &mut self.players[id];
+        p.academy = false; p.team = None; p.salary = salary_for(p.skill);
+        Ok(format!("{} dispensado da base", p.name))
+    }
+
+    /// Fim de temporada: novos jovens, dispensas por idade e decisões da IA.
+    fn academy_season(&mut self, news: &mut Vec<String>) {
+        for t in 0..self.teams.len() {
+            for id in self.academy(t) {
+                if self.players[id].age >= 20 {
+                    if Some(t) == self.managed { news.push(format!("{} completou 20 anos e deixou a base", self.players[id].name)); }
+                    let _ = self.release_youth(t, id);
+                }
+            }
+            let n = 1 + self.teams[t].academy_level as usize / 2;
+            for _ in 0..n {
+                let id = self.gen_prospect(t);
+                if Some(t) == self.managed { news.push(format!("Novo talento na base: {} ({}, hab. {})", self.players[id].name, self.players[id].pos.label(), self.players[id].skill)); }
+            }
+            let mut ac = self.academy(t);
+            ac.sort_by_key(|&id| -self.players[id].skill);
+            for &id in ac.iter().skip(MAX_ACADEMY) { let _ = self.release_youth(t, id); }
+            if Some(t) != self.managed {
+                // IA promove o melhor jovem se ele superar o pior do elenco
+                let worst = self.squad(t).iter().map(|&id| self.players[id].skill).min().unwrap_or(0);
+                if let Some(&best) = ac.first() {
+                    if (self.players[best].skill > worst || self.squad(t).len() < 18) && self.players[best].team == Some(t) { let _ = self.promote_youth(t, best); }
+                }
+                if self.teams[t].budget > 6 * self.academy_upgrade_cost(t) { let _ = self.upgrade_academy(t); }
+            }
+        }
+    }
     pub fn division_teams(&self, div: usize) -> Vec<usize> { self.teams.iter().filter(|t| t.division == div).map(|t| t.id).collect() }
 
     /// Tabela ordenada: pontos, vitórias, saldo, gols pró.
@@ -273,7 +356,7 @@ impl Game {
         if ids.len() != 11 { return Err("Escale exatamente 11 jogadores".into()); }
         let mut seen = std::collections::HashSet::new();
         for &id in ids {
-            if id >= self.players.len() || self.players[id].team != Some(team) { return Err("Jogador não pertence ao clube".into()); }
+            if id >= self.players.len() || self.players[id].team != Some(team) || self.players[id].academy { return Err("Jogador não pertence ao elenco".into()); }
             if !seen.insert(id) { return Err("Jogador repetido".into()); }
             if !self.players[id].available() { return Err(format!("{} está lesionado ou suspenso", self.players[id].name)); }
         }
@@ -285,7 +368,7 @@ impl Game {
 
     fn lineup_valid(&self, team: usize) -> bool {
         let l = &self.teams[team].lineup;
-        l.len() == 11 && l.iter().all(|&id| self.players[id].team == Some(team) && self.players[id].available())
+        l.len() == 11 && l.iter().all(|&id| self.players[id].team == Some(team) && !self.players[id].academy && self.players[id].available())
     }
 
     /// (ataque, defesa) do time escalado.
@@ -511,8 +594,9 @@ impl Game {
         // salários
         for t in 0..self.teams.len() {
             let pay: i64 = self.squad(t).iter().map(|&id| self.players[id].salary).sum();
-            self.teams[t].budget -= pay;
-            if Some(t) == self.managed { self.finance.salaries += pay; }
+            let upkeep = self.academy_upkeep(t);
+            self.teams[t].budget -= pay + upkeep;
+            if Some(t) == self.managed { self.finance.salaries += pay; self.finance.upkeep += upkeep; }
         }
         self.round += 1;
         if self.round >= ROUNDS { self.end_season(); }
@@ -576,6 +660,7 @@ impl Game {
             }
         }
         for t in &mut self.teams { t.stats = Stats::default(); t.capacity = t.capacity.max(DIV_CAPACITY[t.division] / 2); t.ticket_price = DIV_TICKET[t.division]; }
+        self.academy_season(&mut news);
         self.refill_free_agents();
         self.season += 1;
         self.round = 0;
@@ -591,6 +676,7 @@ impl Game {
     pub fn buy(&mut self, buyer: usize, id: usize) -> Result<String, String> {
         let p = self.players.get(id).ok_or("Jogador inexistente")?;
         if p.team == Some(buyer) { return Err("Jogador já é seu".into()); }
+        if p.academy { return Err("Jogadores da base de outros clubes não estão à venda".into()); }
         if self.squad(buyer).len() >= MAX_SQUAD { return Err(format!("Elenco cheio (máx. {})", MAX_SQUAD)); }
         if let Some(seller) = p.team { if self.squad(seller).len() <= MIN_SQUAD { return Err("O clube vendedor não pode liberar mais jogadores".into()); } }
         let price = self.buy_price(id);
@@ -605,7 +691,7 @@ impl Game {
     }
 
     pub fn sell(&mut self, seller: usize, id: usize) -> Result<String, String> {
-        if self.players.get(id).map(|p| p.team) != Some(Some(seller)) { return Err("Jogador não é do seu clube".into()); }
+        if self.players.get(id).map(|p| p.team == Some(seller) && !p.academy) != Some(true) { return Err("Jogador não é do seu elenco".into()); }
         if self.squad(seller).len() <= MIN_SQUAD { return Err(format!("Elenco mínimo de {} jogadores", MIN_SQUAD)); }
         let price = self.sell_price(id);
         let cands: Vec<usize> = (0..self.teams.len()).filter(|&t| t != seller && self.teams[t].budget >= price && self.squad(t).len() < MAX_SQUAD).collect();
@@ -672,7 +758,9 @@ impl Game {
             serde_json::json!({"id": m, "name": t.name, "division": t.division, "budget": t.budget, "capacity": t.capacity, "morale": self.team_morale(m),
                 "ticketPrice": t.ticket_price, "formation": t.formation, "lineup": t.lineup,
                 "squad": self.squad(m).iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>(),
-                "wageBill": self.squad(m).iter().map(|&id| self.players[id].salary).sum::<i64>(), "finance": self.finance})
+                "wageBill": self.squad(m).iter().map(|&id| self.players[id].salary).sum::<i64>(), "finance": self.finance,
+                "academyLevel": t.academy_level, "academyUpgradeCost": self.academy_upgrade_cost(m), "academyUpkeep": self.academy_upkeep(m),
+                "academy": self.academy(m).iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>()})
         });
         let teams: Vec<_> = self.teams.iter().map(|t| serde_json::json!({"id": t.id, "name": t.name, "division": t.division, "budget": t.budget})).collect();
         let mut scorers: Vec<&Player> = self.players.iter().filter(|p| p.goals > 0).collect();
@@ -683,7 +771,7 @@ impl Game {
     }
 
     pub fn market_json(&self, pos: &str, max_price: i64) -> serde_json::Value {
-        let mut v: Vec<&Player> = self.players.iter().filter(|p| p.team != self.managed || self.managed.is_none())
+        let mut v: Vec<&Player> = self.players.iter().filter(|p| !p.academy && (p.team != self.managed || self.managed.is_none()))
             .filter(|p| pos.is_empty() || p.pos.label() == pos).filter(|p| self.buy_price(p.id) <= max_price).collect();
         v.sort_by_key(|p| -p.skill);
         serde_json::Value::Array(v.iter().take(150).map(|p| self.player_json(p)).collect())
@@ -754,6 +842,9 @@ impl FutManager {
     pub fn market(&self, pos: &str, max_price: f64) -> String { self.g.market_json(pos, max_price as i64).to_string() }
     pub fn buy(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.buy(m, id)), None => res(Err("Nenhum time".into())) } }
     pub fn sell(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.sell(m, id)), None => res(Err("Nenhum time".into())) } }
+    pub fn promote_youth(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.promote_youth(m, id)), None => res(Err("Nenhum time".into())) } }
+    pub fn release_youth(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.release_youth(m, id)), None => res(Err("Nenhum time".into())) } }
+    pub fn upgrade_academy(&mut self) -> String { match self.g.managed { Some(m) => res(self.g.upgrade_academy(m)), None => res(Err("Nenhum time".into())) } }
 }
 
 // ---------------------------------------------------------------- Testes
@@ -989,7 +1080,41 @@ mod tests {
     }
 
     #[test]
+    fn youth_academy() {
+        let mut g = Game::new(51);
+        g.managed = Some(2);
+        let ac = g.academy(2);
+        assert_eq!(ac.len(), 2);
+        assert_eq!(g.squad(2).len(), 18, "base não conta no elenco");
+        assert!(ac.iter().all(|&id| g.players[id].age <= 17));
+        let mut l = g.teams[2].lineup.clone();
+        let i = l.iter().position(|&id| g.players[id].pos != Pos::G).unwrap();
+        l[i] = ac[0];
+        if g.players[ac[0]].pos != Pos::G { assert!(g.set_lineup(2, "4-4-2", &l).is_err()); }
+        assert!(g.buy(3, ac[0]).is_err());
+        g.promote_youth(2, ac[0]).unwrap();
+        assert_eq!(g.squad(2).len(), 19);
+        g.release_youth(2, ac[1]).unwrap();
+        assert_eq!(g.players[ac[1]].team, None);
+        assert!(g.promote_youth(2, ac[1]).is_err());
+        // melhorar a base
+        g.teams[2].budget = 10_000_000;
+        let c = g.academy_upgrade_cost(2);
+        g.upgrade_academy(2).unwrap();
+        assert_eq!(g.teams[2].academy_level, 2);
+        assert_eq!(g.teams[2].budget, 10_000_000 - c);
+        g.teams[2].budget = 0;
+        assert!(g.upgrade_academy(2).is_err());
+        // fim de temporada gera novos jovens
+        for _ in 0..ROUNDS { g.play_round(); }
+        assert_eq!(g.season, 2);
+        assert!(!g.academy(2).is_empty());
+        assert!(g.teams.iter().all(|t| g.academy(t.id).len() <= MAX_ACADEMY));
+    }
+
+    #[test]
     fn save_load_roundtrip() {
+
 
 
 
