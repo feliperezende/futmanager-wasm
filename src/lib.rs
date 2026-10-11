@@ -76,7 +76,15 @@ pub struct LiveMatch {
     pub reds: Vec<(usize, u8)>,
     /// lesões: (jogador, rodadas)
     pub injuries: Vec<(usize, u8)>,
+    /// substituições usadas por lado
+    #[serde(default)]
+    pub subs: [u8; 2],
+    /// jogadores que deixaram o campo (não podem voltar)
+    #[serde(default)]
+    pub out: Vec<usize>,
 }
+
+pub const MAX_SUBS: u8 = 3;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Stats { pub p: i32, pub w: i32, pub d: i32, pub l: i32, pub gf: i32, pub ga: i32, pub pts: i32 }
@@ -319,6 +327,7 @@ impl Game {
                 let direct = self.rng.f64() < 0.07;
                 if direct || m.booked.contains(&pl) {
                     m.on[side].retain(|&x| x != pl);
+                    m.out.push(pl);
                     m.reds.push((pl, if direct { 2 } else { 1 }));
                     m.events.push(ev("vermelho", if direct { format!("Cartão VERMELHO direto para {name}!") } else { format!("Segundo amarelo: {name} expulso!") }));
                 } else {
@@ -328,11 +337,63 @@ impl Game {
             } else if r < p * 3.0 + 0.0045 + 0.0011 {
                 let pl = *self.rng.pick(&m.on[side]);
                 let rounds = self.rng.range(1, 5) as u8;
-                m.on[side].retain(|&x| x != pl);
                 m.injuries.push((pl, rounds));
-                m.events.push(ev("lesao", format!("{} se lesiona e deixa o campo ({} rodada(s) fora)", self.players[pl].name, rounds)));
+                m.events.push(ev("lesao", format!("{} se lesiona ({} rodada(s) fora)", self.players[pl].name, rounds)));
+                let pos = self.players[pl].pos;
+                let bench = self.bench(m, side);
+                let repl = bench.iter().copied().filter(|&b| self.players[b].pos == pos).max_by_key(|&b| self.players[b].skill)
+                    .or_else(|| bench.iter().copied().max_by_key(|&b| self.players[b].skill));
+                match repl {
+                    Some(b) if m.subs[side] < MAX_SUBS => { let _ = self.substitute(m, side, pl, b); }
+                    _ => { m.on[side].retain(|&x| x != pl); m.out.push(pl); }
+                }
             }
         }
+        // substituições táticas da IA
+        if minute == 62 || minute == 75 {
+            for side in 0..2 {
+                let team = if side == 0 { m.home } else { m.away };
+                if Some(team) == self.managed || m.subs[side] >= MAX_SUBS - 1 || self.rng.f64() < 0.3 { continue; }
+                let Some(&worst) = m.on[side].iter().filter(|&&id| self.players[id].pos != Pos::G).min_by_key(|&&id| self.players[id].skill) else { continue };
+                let pos = self.players[worst].pos;
+                if let Some(b) = self.bench(m, side).into_iter().filter(|&b| self.players[b].pos == pos).max_by_key(|&b| self.players[b].skill) {
+                    let _ = self.substitute(m, side, worst, b);
+                }
+            }
+        }
+    }
+
+    /// Reservas disponíveis para um lado da partida.
+    pub fn bench(&self, m: &LiveMatch, side: usize) -> Vec<usize> {
+        let team = if side == 0 { m.home } else { m.away };
+        self.squad(team).into_iter().filter(|id| self.players[*id].available() && !m.on[side].contains(id) && !m.out.contains(id)
+            && !m.injuries.iter().any(|x| x.0 == *id)).collect()
+    }
+
+    /// Realiza uma substituição numa partida ao vivo.
+    pub fn substitute(&self, m: &mut LiveMatch, side: usize, out: usize, inn: usize) -> Result<String, String> {
+        if m.minute >= 90 { return Err("A partida já terminou".into()); }
+        if m.subs[side] >= MAX_SUBS { return Err(format!("Limite de {MAX_SUBS} substituições atingido")); }
+        if !m.on[side].contains(&out) && !m.injuries.iter().any(|x| x.0 == out && !m.out.contains(&out)) { return Err("Esse jogador não está em campo".into()); }
+        if !self.bench(m, side).contains(&inn) { return Err("Esse reserva não está disponível".into()); }
+        m.on[side].retain(|&x| x != out);
+        m.out.push(out);
+        m.on[side].push(inn);
+        m.subs[side] += 1;
+        let text = format!("Substituição: sai {}, entra {}", self.players[out].name, self.players[inn].name);
+        m.events.push(Event { minute: m.minute, side: side as u8, kind: "sub".into(), text: text.clone() });
+        Ok(text)
+    }
+
+    /// Substituição do clube gerenciado na partida em andamento.
+    pub fn substitute_managed(&mut self, out: usize, inn: usize) -> Result<String, String> {
+        let me = self.managed.ok_or("Nenhum time")?;
+        let i = self.live.iter().position(|m| m.home == me || m.away == me).ok_or("Nenhuma partida em andamento")?;
+        let mut m = std::mem::take(&mut self.live[i]);
+        let side = if m.home == me { 0 } else { 1 };
+        let r = self.substitute(&mut m, side, out, inn);
+        self.live[i] = m;
+        r
     }
 
     fn attendance(&mut self, home: usize) -> i64 {
@@ -549,11 +610,13 @@ impl Game {
 
     /// Estado das partidas ao vivo de uma divisão.
     pub fn live_json(&self, div: usize) -> serde_json::Value {
-        serde_json::Value::Array(self.live.iter().filter(|m| m.division == div).map(|m| serde_json::json!({
+        serde_json::Value::Array(self.live.iter().filter(|m| m.division == div).map(|m| { let bench: Vec<Vec<serde_json::Value>> = [0usize, 1].iter().map(|&s| if Some(if s == 0 { m.home } else { m.away }) == self.managed {
+                self.bench(m, s).iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>() } else { vec![] }).collect(); serde_json::json!({
             "home": m.home, "away": m.away, "homeName": self.teams[m.home].name, "awayName": self.teams[m.away].name,
-            "hg": m.hg, "ag": m.ag, "minute": m.minute, "events": m.events,
+            "hg": m.hg, "ag": m.ag, "minute": m.minute, "events": m.events, "subs": m.subs, "bench": bench,
+
             "on": [m.on[0].iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>(),
-                   m.on[1].iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>()]})).collect())
+                   m.on[1].iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>()]}) }).collect())
     }
 
     pub fn state_json(&self) -> serde_json::Value {
@@ -636,6 +699,8 @@ impl FutManager {
         self.g.live_json(div).to_string()
     }
     pub fn finish_round(&mut self) -> String { let r = self.g.finish_round(); self.results_json(&r) }
+    /// Substituição ao vivo do clube gerenciado.
+    pub fn substitute(&mut self, out: usize, inn: usize) -> String { res(self.g.substitute_managed(out, inn)) }
     fn results_json(&self, r: &[MatchResult]) -> String {
         let names = |t: usize| self.g.teams[t].name.clone();
         serde_json::Value::Array(r.iter().map(|m| serde_json::json!({"division": m.division, "home": m.home, "away": m.away,
@@ -816,7 +881,51 @@ mod tests {
     }
 
     #[test]
+    fn live_substitutions() {
+        let mut g = Game::new(31);
+        g.managed = Some(0);
+        g.start_round();
+        for _ in 0..30 { g.step(); }
+        let i = g.live.iter().position(|m| m.home == 0 || m.away == 0).unwrap();
+        let side = if g.live[i].home == 0 { 0 } else { 1 };
+        let bench = g.bench(&g.live[i], side);
+        assert!(bench.len() >= 3);
+        let on = g.live[i].on[side].clone();
+        assert!(g.substitute_managed(on[1], on[2]).is_err(), "titular não pode entrar de novo");
+        assert!(g.substitute_managed(g.squad(1)[0], bench[0]).is_err(), "jogador de outro time");
+        g.substitute_managed(on[1], bench[0]).unwrap();
+        assert!(g.live[i].on[side].contains(&bench[0]) && !g.live[i].on[side].contains(&on[1]));
+        assert!(g.substitute_managed(bench[0], on[1]).is_err(), "quem saiu não volta");
+        g.substitute_managed(on[2], bench[1]).unwrap();
+        g.substitute_managed(on[3], bench[2]).unwrap();
+        let more = g.bench(&g.live[i], side);
+        assert!(g.substitute_managed(on[4], more[0]).is_err(), "máximo de 3");
+        assert_eq!(g.live[i].subs[side], 3);
+        let res = g.finish_round();
+        assert!(res.iter().any(|r| r.events.iter().any(|e| e.kind == "sub")));
+        assert!(g.substitute_managed(on[5], more[0]).is_err());
+    }
+
+    #[test]
+    fn injured_players_are_replaced() {
+        let mut g = Game::new(32);
+        let mut subs_for_injury = 0;
+        for _ in 0..10 {
+            g.start_round();
+            while g.step() {}
+            for m in &g.live {
+                assert!(m.subs.iter().all(|&s| s <= MAX_SUBS));
+                for s in 0..2 { assert!(m.on[s].len() <= 11); }
+                subs_for_injury += m.injuries.len();
+            }
+            g.finish_round();
+        }
+        assert!(subs_for_injury > 0);
+    }
+
+    #[test]
     fn save_load_roundtrip() {
+
 
         let mut g = Game::new(13);
         g.managed = Some(3);

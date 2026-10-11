@@ -148,6 +148,27 @@ function setStatus() {
   $('#status').textContent = `${m.name} | Div ${m.division + 1} | Temporada ${st.season} | Rodada ${Math.min(st.round + 1, st.rounds)}/${st.rounds} | ${money(m.budget)}`;
 }
 
+let subsKey = '';
+function renderSubs(mm) {
+  const box = document.getElementById('subs');
+  if (!box) return;
+  if (!mm || mm.minute >= 90) { box.innerHTML = ''; subsKey = ''; return; }
+  const side = mm.home === st.managed.id ? 0 : 1;
+  const on = mm.on[side], bench = mm.bench[side];
+  const key = on.map((p) => p.id).join(',') + '|' + bench.map((p) => p.id).join(',') + '|' + mm.subs[side];
+  if (key === subsKey) return;
+  subsKey = key;
+  const opt = (p) => `<option value="${p.id}">${p.pos} ${esc(p.name)} (${p.skill})</option>`;
+  box.innerHTML = `<fieldset><legend>Substituições (${mm.subs[side]}/3)</legend>
+    Sai: <select id="subOut">${on.map(opt).join('')}</select>
+    Entra: <select id="subIn">${bench.map(opt).join('')}</select>
+    <button id="btnSub" ${mm.subs[side] >= 3 ? 'disabled' : ''}>Substituir</button></fieldset>`;
+  $('#btnSub').onclick = () => {
+    const r = JSON.parse(game.substitute(+$('#subOut').value, +$('#subIn').value));
+    flash(r); showLive(JSON.parse(game.live()));
+  };
+}
+
 let tableDiv = null;
 function renderTable() {
   if (tableDiv === null) tableDiv = st.managed.division;
@@ -208,6 +229,11 @@ if (location.search.includes('selftest')) {
     game.start_round();
     const lv = JSON.parse(game.step(45));
     if (lv[0].minute !== 45) throw 'step falhou';
+    const mm = lv.find((x) => x.home === st.managed.id || x.away === st.managed.id);
+    const sd = mm.home === st.managed.id ? 0 : 1;
+    const sr = JSON.parse(game.substitute(mm.on[sd][1].id, mm.bench[sd][0].id));
+    if (!sr.ok) throw 'substituição falhou: ' + sr.msg;
+    out.push('sub=ok');
     const r = JSON.parse(game.finish_round());
     out.push('jogos=' + r.length);
     const mk = JSON.parse(game.market('', 1e12));
