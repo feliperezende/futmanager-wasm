@@ -74,6 +74,9 @@ pub struct Player {
     /// Condição física entre partidas (0..100)
     #[serde(default = "full")]
     pub condition: i32,
+    /// Aposentado (vaga reaproveitada para novos jogadores)
+    #[serde(default)]
+    pub retired: bool,
 }
 
 fn full() -> i32 { 100 }
@@ -171,7 +174,16 @@ pub struct Team {
     /// Marcação pressão (rouba mais bolas, cansa mais)
     #[serde(default)]
     pub pressing: bool,
+    /// Rodadas consecutivas com caixa negativo
+    #[serde(default)]
+    pub debt_rounds: u32,
 }
+
+/// Juros por rodada sobre saldo negativo (%)
+pub const OVERDRAFT_PCT: f64 = 1.5;
+/// Rodadas seguidas no vermelho até a diretoria demitir o técnico
+pub const FIRE_AFTER_ROUNDS: u32 = 12;
+pub const MAX_FREE_AGENTS: usize = 150;
 
 pub const BANK_INTEREST_PCT: i64 = 12;
 pub const BANK_INSTALLMENTS: i64 = 30;
@@ -206,7 +218,8 @@ pub struct MatchResult {
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Finance { pub tickets: i64, pub salaries: i64, pub transfers_in: i64, pub transfers_out: i64, pub prizes: i64,
     #[serde(default)] pub upkeep: i64, #[serde(default)] pub investments: i64,
-    #[serde(default)] pub bank_in: i64, #[serde(default)] pub bank_paid: i64, #[serde(default)] pub loan_fees: i64 }
+    #[serde(default)] pub bank_in: i64, #[serde(default)] pub bank_paid: i64, #[serde(default)] pub loan_fees: i64,
+    #[serde(default)] pub tv: i64 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Game {
@@ -222,6 +235,9 @@ pub struct Game {
     pub last_results: Vec<MatchResult>,
     #[serde(default)]
     pub live: Vec<LiveMatch>,
+    /// O técnico foi demitido e precisa escolher um novo clube
+    #[serde(default)]
+    pub fired: bool,
 }
 
 pub const FORMATIONS: [&str; 5] = ["4-4-2", "4-3-3", "3-5-2", "5-3-2", "4-5-1"];
@@ -249,13 +265,15 @@ pub fn player_value(p: &Player) -> i64 {
     let s = p.skill.max(1) as f64;
     ((s * s * s / 30.0 * age_f) as i64).max(10) * 1000
 }
-fn salary_for(skill: i32) -> i64 { let s = skill as f64; ((s * s * s / 30.0) as i64 / 600).max(1) * 1000 }
+fn salary_for(skill: i32) -> i64 { let s = skill as f64; ((s * s * s / 30.0) as i64 / 450).max(1) * 1000 }
 
 const DIV_BASE_SKILL: [i32; 4] = [72, 62, 52, 42];
-const DIV_CAPACITY: [i64; 4] = [45000, 25000, 12000, 6000];
-const DIV_TICKET: [i64; 4] = [60, 40, 28, 20];
+const DIV_CAPACITY: [i64; 4] = [40000, 22000, 12000, 7000];
+const DIV_TICKET: [i64; 4] = [40, 30, 22, 18];
 const DIV_BUDGET: [i64; 4] = [25_000_000, 10_000_000, 4_000_000, 1_500_000];
 const DIV_PRIZE: [i64; 4] = [8_000_000, 3_000_000, 1_200_000, 500_000];
+/// Cotas de TV/patrocínio por rodada
+const DIV_TV: [i64; 4] = [200_000, 120_000, 70_000, 45_000];
 
 impl Game {
     pub fn new(seed: u64) -> Game {
@@ -274,14 +292,14 @@ impl Game {
                 teams.push(Team { id, name, division: div, budget: DIV_BUDGET[div] + rng.range(0, 10) * DIV_BUDGET[div] / 20,
                     capacity: DIV_CAPACITY[div] * rng.range(70, 130) / 100, ticket_price: DIV_TICKET[div],
                     formation: rng.pick(&FORMATIONS).to_string(), lineup: vec![], stats: Stats::default(), academy_level: 1, construction: None,
-                    bank_debt: 0, bank_payment: 0, tactic: default_tactic(), pressing: false });
+                    bank_debt: 0, bank_payment: 0, tactic: default_tactic(), pressing: false, debt_rounds: 0 });
                 for (pos, n) in [(Pos::G, 2), (Pos::D, 6), (Pos::M, 6), (Pos::A, 4)] {
                     for _ in 0..n { let p = Self::gen_player(&mut rng, players.len(), pos, base, Some(id)); players.push(p); }
                 }
             }
         }
         let mut g = Game { rng, season: 1, round: 0, teams, players, schedule: vec![], managed: None,
-            finance: Finance::default(), news: vec![], last_results: vec![], live: vec![] };
+            finance: Finance::default(), news: vec![], last_results: vec![], live: vec![], fired: false };
         g.refill_free_agents();
         for i in 0..g.players.len() { if g.players[i].team.is_some() { g.players[i].contract_until = 1 + g.rng.range(0, 3) as u32; } }
         for t in 0..g.teams.len() { for _ in 0..2 { g.gen_prospect(t); } }
@@ -294,17 +312,69 @@ impl Game {
         let skill = (base + rng.range(-10, 10) as i32).clamp(15, 95);
         Player { id, name: gen_player_name(rng), pos, skill, age: rng.range(17, 34) as i32, salary: salary_for(skill), team, goals: 0,
             yellows: 0, suspended: 0, injured: 0, morale: 50, academy: false, loan_from: None, contract_until: 0, refusals: 0,
-            attrs: Attrs::generate(rng, pos, skill), condition: 100 }
+            attrs: Attrs::generate(rng, pos, skill), condition: 100, retired: false }
     }
 
     fn refill_free_agents(&mut self) {
-        let free = self.players.iter().filter(|p| p.team.is_none()).count();
-        for _ in free..40 {
+        // aposenta livres veteranos e o excesso de livres fracos (reaproveita as vagas)
+        let mut free: Vec<usize> = self.free_agents();
+        for &id in &free { if self.players[id].age >= 34 { self.players[id].retired = true; } }
+        free.retain(|&id| !self.players[id].retired);
+        free.sort_by_key(|&id| -self.players[id].skill);
+        for &id in free.iter().skip(MAX_FREE_AGENTS) { self.players[id].retired = true; }
+        for _ in free.len().min(MAX_FREE_AGENTS)..40 {
             let pos = *self.rng.pick(&[Pos::G, Pos::D, Pos::D, Pos::M, Pos::M, Pos::A]);
             let base = self.rng.range(35, 65) as i32;
-            let p = Self::gen_player(&mut self.rng, self.players.len(), pos, base, None);
-            self.players.push(p);
+            let id = self.alloc_id();
+            let p = Self::gen_player(&mut self.rng, id, pos, base, None);
+            self.put_player(p);
         }
+    }
+
+    pub fn free_agents(&self) -> Vec<usize> { self.players.iter().filter(|p| p.team.is_none() && !p.retired).map(|p| p.id).collect() }
+
+    /// Próximo id livre (reaproveita aposentados).
+    fn alloc_id(&self) -> usize { self.players.iter().position(|p| p.retired).unwrap_or(self.players.len()) }
+    fn put_player(&mut self, p: Player) { let id = p.id; if id == self.players.len() { self.players.push(p) } else { self.players[id] = p } }
+
+    /// Consequências de dívidas: juros, vendas forçadas e demissão do técnico.
+    fn debt_consequences(&mut self) {
+        for t in 0..self.teams.len() {
+            if self.teams[t].budget >= 0 { self.teams[t].debt_rounds = 0; continue; }
+            let interest = (-self.teams[t].budget as f64 * OVERDRAFT_PCT / 100.0) as i64;
+            self.teams[t].budget -= interest;
+            self.teams[t].debt_rounds += 1;
+            if Some(t) == self.managed { self.finance.upkeep += interest; }
+            let dr = self.teams[t].debt_rounds;
+            let is_user = Some(t) == self.managed;
+            // venda forçada do jogador mais valioso
+            let force = if is_user { dr >= 6 && dr % 3 == 0 } else { dr >= 2 };
+            if force && self.squad(t).len() > MIN_SQUAD + 1 {
+                let best = self.squad(t).into_iter().filter(|&id| self.players[id].loan_from.is_none()).max_by_key(|&id| player_value(&self.players[id]));
+                if let Some(id) = best {
+                    if let Ok(msg) = self.sell(t, id) {
+                        if is_user { self.news.push(format!("Diretoria: venda forçada para cobrir a dívida — {msg}")); }
+                    }
+                }
+            }
+            if is_user {
+                if dr == 3 { self.news.push("Diretoria: o caixa está no vermelho! Equilibre as contas.".into()); }
+                if dr == FIRE_AFTER_ROUNDS - 3 { self.news.push(format!("Diretoria: ÚLTIMO AVISO — {} rodadas no vermelho levam à demissão.", FIRE_AFTER_ROUNDS)); }
+                if dr >= FIRE_AFTER_ROUNDS || self.teams[t].budget < -3 * DIV_BUDGET[self.teams[t].division] {
+                    self.news.push(format!("Você foi DEMITIDO do {} por causa das dívidas.", self.teams[t].name));
+                    self.fired = true;
+                    self.managed = None;
+                }
+            }
+        }
+    }
+
+    /// Clubes que aceitariam contratar o técnico demitido (divisão inferior ou igual à mais baixa).
+    pub fn job_offers(&self) -> Vec<usize> {
+        let mut v: Vec<usize> = self.teams.iter().filter(|t| t.division == DIVISIONS - 1 || t.division >= 2).map(|t| t.id).collect();
+        v.sort_by_key(|&t| -(self.teams[t].budget));
+        v.truncate(6);
+        v
     }
 
     pub fn squad(&self, team: usize) -> Vec<usize> { self.players.iter().filter(|p| p.team == Some(team) && !p.academy).map(|p| p.id).collect() }
@@ -315,12 +385,12 @@ impl Game {
         let lvl = self.teams[team].academy_level as i32;
         let base = DIV_BASE_SKILL[self.teams[team].division] - 18 + lvl * 4;
         let pos = *self.rng.pick(&[Pos::G, Pos::D, Pos::D, Pos::M, Pos::M, Pos::A, Pos::A]);
-        let id = self.players.len();
+        let id = self.alloc_id();
         let mut p = Self::gen_player(&mut self.rng, id, pos, base, Some(team));
         p.age = self.rng.range(16, 17) as i32;
         p.academy = true;
         p.salary = 1000;
-        self.players.push(p);
+        self.put_player(p);
         id
     }
 
@@ -668,7 +738,9 @@ impl Game {
         let t = &self.teams[home];
         let (a, d) = self.strength(home);
         let s = &t.stats;
-        let interest = (0.5 + ((a + d) / 1200.0 - 0.5) + 0.05 * s.pts as f64 / (s.p.max(1) as f64)).clamp(0.2, 1.3);
+        // interesse relativo ao nível da divisão + campanha
+        let rel = (a + d) / (13.5 * DIV_BASE_SKILL[t.division] as f64) - 1.0;
+        let interest = (0.6 + rel + 0.08 * s.pts as f64 / (s.p.max(1) as f64)).clamp(0.2, 1.3);
         let price_factor = (DIV_TICKET[t.division] as f64 / t.ticket_price.max(1) as f64).powf(1.3).min(2.0);
         DIV_CAPACITY[t.division] as f64 * interest * price_factor
     }
@@ -864,11 +936,15 @@ impl Game {
         for t in 0..self.teams.len() {
             let pay: i64 = self.squad(t).iter().map(|&id| self.players[id].salary).sum();
             let upkeep = self.academy_upkeep(t) + self.stadium_upkeep(t);
+            let tv = DIV_TV[self.teams[t].division];
+            self.teams[t].budget += tv;
+            if Some(t) == self.managed { self.finance.tv += tv; }
             self.teams[t].budget -= pay + upkeep;
             if Some(t) == self.managed { self.finance.salaries += pay; self.finance.upkeep += upkeep; }
         }
         self.advance_construction();
         self.pay_bank_installments();
+        self.debt_consequences();
         self.round += 1;
         if self.round >= ROUNDS { self.end_season(); }
         self.last_results = results.clone();
@@ -954,6 +1030,7 @@ impl Game {
         let p = self.players.get(id).ok_or("Jogador inexistente")?;
         if p.team == Some(buyer) { return Err("Jogador já é seu".into()); }
         if p.academy { return Err("Jogadores da base de outros clubes não estão à venda".into()); }
+        if p.retired { return Err("Jogador aposentado".into()); }
         if p.loan_from.is_some() { return Err("Jogador emprestado não pode ser negociado".into()); }
         if self.squad(buyer).len() >= MAX_SQUAD { return Err(format!("Elenco cheio (máx. {})", MAX_SQUAD)); }
         if let Some(seller) = p.team { if self.squad(seller).len() <= MIN_SQUAD { return Err("O clube vendedor não pode liberar mais jogadores".into()); } }
@@ -991,7 +1068,7 @@ impl Game {
             while self.squad(t).len() < min {
                 // contrata o melhor livre que couber no bolso (ou o mais barato)
                 let budget = self.teams[t].budget;
-                let free: Vec<usize> = self.players.iter().filter(|p| p.team.is_none()).map(|p| p.id).collect();
+                let free: Vec<usize> = self.free_agents();
                 let best = free.iter().copied().filter(|&id| self.buy_price(id) <= budget / 4).max_by_key(|&id| self.players[id].skill)
                     .or_else(|| free.iter().copied().min_by_key(|&id| self.buy_price(id)));
                 let Some(id) = best else { break };
@@ -1001,8 +1078,25 @@ impl Game {
             }
         }
 
+        // clubes ricos investem em reforços (faz o dinheiro circular entre as divisões)
+        for t in 0..self.teams.len() {
+            if Some(t) == self.managed || self.squad(t).len() >= 24 { continue; }
+            let div = self.teams[t].division;
+            if self.teams[t].budget < 2 * DIV_BUDGET[div] || self.rng.f64() > 0.2 { continue; }
+            let mut skills: Vec<i32> = self.squad(t).iter().map(|&i| self.players[i].skill).collect();
+            skills.sort();
+            let median = skills[skills.len() / 2];
+            let budget = self.teams[t].budget / 3;
+            let target = self.players.iter().filter(|p| !p.retired && !p.academy && p.loan_from.is_none() && p.team != Some(t) && p.team != self.managed
+                && p.skill > median && p.age <= 30 && p.team.map_or(true, |o| self.squad(o).len() > MIN_SQUAD + 2))
+                .map(|p| p.id).filter(|&id| self.buy_price(id) <= budget).max_by_key(|&id| self.players[id].skill);
+            if let Some(id) = target {
+                if self.buy(t, id).is_ok() { self.news.push(format!("Mercado: {} reforça o {}", self.players[id].name, self.teams[t].name)); }
+            }
+        }
         if self.rng.f64() < 0.5 {
             let t = self.rng.range(0, self.teams.len() as i64 - 1) as usize;
+
             if Some(t) != self.managed && self.squad(t).len() < 24 {
                 let id = self.rng.range(0, self.players.len() as i64 - 1) as usize;
                 if self.players[id].team != self.managed && self.players[id].team.is_some() && self.buy(t, id).is_ok() {
@@ -1130,6 +1224,7 @@ impl Game {
                 "bankDebt": t.bank_debt, "bankPayment": t.bank_payment, "bankLimit": self.bank_limit(m),
                 "loanedOut": self.players.iter().filter(|p| p.loan_from == Some(m)).map(|p| self.player_json(p)).collect::<Vec<_>>(),
                 "tactic": t.tactic, "pressing": t.pressing, "mentalities": MENTALITIES,
+                "debtRounds": t.debt_rounds,
                 "academyLevel": t.academy_level, "academyUpgradeCost": self.academy_upgrade_cost(m), "academyUpkeep": self.academy_upkeep(m),
                 "academy": self.academy(m).iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>()})
         });
@@ -1137,12 +1232,13 @@ impl Game {
         let mut scorers: Vec<&Player> = self.players.iter().filter(|p| p.goals > 0).collect();
         scorers.sort_by_key(|p| -p.goals);
         serde_json::json!({"season": self.season, "round": self.round, "rounds": ROUNDS, "tables": tables, "next": next, "liveActive": !self.live.is_empty(),
+            "fired": self.fired, "jobOffers": self.job_offers().iter().map(|&t| serde_json::json!({"id": t, "name": self.teams[t].name, "division": self.teams[t].division, "budget": self.teams[t].budget})).collect::<Vec<_>>(),
             "managed": managed, "teams": teams, "news": self.news, "formations": FORMATIONS,
             "scorers": scorers.iter().take(15).map(|p| self.player_json(p)).collect::<Vec<_>>()})
     }
 
     pub fn market_json(&self, pos: &str, max_price: i64) -> serde_json::Value {
-        let mut v: Vec<&Player> = self.players.iter().filter(|p| !p.academy && p.loan_from.is_none() && (p.team != self.managed || self.managed.is_none()))
+        let mut v: Vec<&Player> = self.players.iter().filter(|p| !p.retired && !p.academy && p.loan_from.is_none() && (p.team != self.managed || self.managed.is_none()))
             .filter(|p| pos.is_empty() || p.pos.label() == pos).filter(|p| self.buy_price(p.id) <= max_price).collect();
         v.sort_by_key(|p| -p.skill);
         serde_json::Value::Array(v.iter().take(150).map(|p| self.player_json(p)).collect())
@@ -1168,6 +1264,10 @@ impl FutManager {
     pub fn state(&self) -> String { self.g.state_json().to_string() }
     pub fn choose_team(&mut self, team: usize) -> String {
         if team >= self.g.teams.len() { return res(Err("Time inválido".into())); }
+        if self.g.fired && !self.g.job_offers().contains(&team) { return res(Err("Esse clube não fez proposta".into())); }
+        self.g.fired = false;
+        self.g.teams[team].debt_rounds = 0;
+        self.g.finance = Finance::default();
         self.g.managed = Some(team);
         res(Ok(format!("Você assumiu o {}", self.g.teams[team].name)))
     }
@@ -1662,8 +1762,67 @@ mod tests {
         assert!(g.role_value(p, g.players[p].pos, 30.0) < full * 0.85);
     }
 
+    /// Estatísticas de várias temporadas sem técnico humano (usado para calibrar a economia).
+    pub fn season_report(seed: u64, seasons: usize) -> Vec<String> {
+        let mut g = Game::new(seed);
+        let mut out = vec![];
+        for s in 0..seasons {
+            let mut goals = 0u32; let mut games = 0u32;
+            for _ in 0..ROUNDS { for m in g.play_round() { goals += m.hg + m.ag; games += 1; } }
+            let mut line = format!("T{} gols/jogo {:.2} jogadores {} livres {}", s + 1, goals as f64 / games as f64, g.players.len(), g.free_agents().len());
+            for d in 0..DIVISIONS {
+                let mut b: Vec<i64> = g.division_teams(d).iter().map(|&t| g.teams[t].budget).collect();
+                b.sort();
+                let neg = b.iter().filter(|&&x| x < 0).count();
+                line += &format!(" | D{} min {:.1}M med {:.1}M max {:.1}M neg {}", d + 1, b[0] as f64 / 1e6, b[b.len() / 2] as f64 / 1e6, b[b.len() - 1] as f64 / 1e6, neg);
+            }
+            out.push(line);
+        }
+        out
+    }
+
+    #[test]
+    #[ignore]
+    fn finance_report() { for l in season_report(2024, 8) { println!("{l}"); } }
+
+    #[test]
+    fn economy_is_stable_over_seasons() {
+        let mut g = Game::new(2025);
+        for _ in 0..5 * ROUNDS { g.play_round(); }
+        assert_eq!(g.season, 6);
+        let neg = g.teams.iter().filter(|t| t.budget < 0).count();
+        assert!(neg <= g.teams.len() / 5, "{neg} clubes no vermelho");
+        assert!(g.teams.iter().all(|t| t.budget > -2 * DIV_BUDGET[t.division]), "nenhuma dívida explosiva");
+        assert!(g.teams.iter().all(|t| g.squad(t.id).len() >= MIN_SQUAD));
+        let mut med: Vec<Vec<i64>> = (0..DIVISIONS).map(|d| g.division_teams(d).iter().map(|&t| g.teams[t].budget).collect()).collect();
+        for v in med.iter_mut() { v.sort(); }
+        assert!(med[0][8] > med[3][8], "primeira divisão mais rica que a quarta");
+        assert!(g.players.len() < 2400, "vagas de jogadores reaproveitadas: {}", g.players.len());
+    }
+
+    #[test]
+    fn debt_consequences_for_user_and_ai() {
+        let mut g = Game::new(94);
+        g.managed = Some(40);
+        g.teams[41].budget = -5_000_000;
+        let sq41 = g.squad(41).len();
+        g.teams[40].budget = -100_000;
+        g.play_round();
+        assert!(g.teams[40].budget < -100_000, "juros sobre saldo negativo");
+        g.play_round();
+        assert!(g.squad(41).len() < sq41, "IA endividada vende jogadores");
+        assert!(g.buy(40, g.free_agents()[0]).is_err() || g.buy_price(g.free_agents()[0]) == 0);
+        for _ in 0..FIRE_AFTER_ROUNDS { if g.managed.is_none() { break; } g.teams[40].budget = g.teams[40].budget.min(-100_000); g.play_round(); }
+        assert!(g.fired && g.managed.is_none(), "técnico demitido");
+        let offers = g.job_offers();
+        assert!(!offers.is_empty());
+        // o jogo continua sem técnico
+        g.play_round();
+    }
+
     #[test]
     fn save_load_roundtrip() {
+
 
 
 

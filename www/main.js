@@ -37,7 +37,21 @@ $('#btnQuit').onclick = () => { if (confirm('Voltar ao menu? Progresso não salv
 document.querySelectorAll('.menubar [data-tab]').forEach((b) => b.onclick = () => { if (!playing) { tab = b.dataset.tab; render(); } });
 
 // ------------------------------------------------ Render
+function renderFired() {
+  document.querySelectorAll('.tab').forEach((s) => s.classList.add('hidden'));
+  $('#tab-clube').classList.remove('hidden');
+  $('#status').textContent = `Desempregado | Temporada ${st.season}`;
+  $('#tab-clube').innerHTML = `<fieldset><legend>Você foi demitido!</legend>
+    <div>${st.news.map((n) => `<div>📰 ${esc(n)}</div>`).join('')}</div>
+    <p>A diretoria perdeu a paciência com as dívidas. Estes clubes fizeram propostas:</p>
+    <table><tr><th>Clube</th><th>Divisão</th><th>Caixa</th><th></th></tr>
+    ${st.jobOffers.map((t) => `<tr><td>${esc(t.name)}</td><td>${t.division + 1}</td><td>${money(t.budget)}</td><td><button data-job="${t.id}">Aceitar</button></td></tr>`).join('')}
+    </table></fieldset>`;
+  document.querySelectorAll('[data-job]').forEach((b) => b.onclick = () => { flash(JSON.parse(game.choose_team(+b.dataset.job))); tab = 'clube'; refresh(); });
+}
+
 function render() {
+  if (!st.managed) return renderFired();
   const m = st.managed;
   $('#status').textContent = `${m.name} | Div ${m.division + 1} | Temporada ${st.season} | Rodada ${Math.min(st.round + 1, st.rounds)}/${st.rounds} | ${money(m.budget)}`;
   document.querySelectorAll('.tab').forEach((s) => s.classList.add('hidden'));
@@ -152,7 +166,7 @@ function finishLive() {
   clearInterval(liveTimer);
   const results = JSON.parse(game.finish_round());
   playing = false;
-  const myMatch = results.find((r) => r.home === st.managed.id || r.away === st.managed.id);
+  const myMatch = results.find((r) => st.managed && (r.home === st.managed.id || r.away === st.managed.id));
   const att = myMatch ? `Público: ${myMatch.attendance.toLocaleString('pt-BR')}` : '';
   st = JSON.parse(game.state());
   $('#ticker').insertAdjacentHTML('afterbegin', `<div class="gol">FIM DE JOGO! ${att}</div>${st.news.map((n) => `<div>📰 ${esc(n)}</div>`).join('')}`);
@@ -164,6 +178,7 @@ function finishLive() {
 }
 function setStatus() {
   const m = st.managed;
+  if (!m) { $('#btnPlay').onclick = () => render(); $('#btnPlay').textContent = '▶ Continuar'; return; }
   $('#status').textContent = `${m.name} | Div ${m.division + 1} | Temporada ${st.season} | Rodada ${Math.min(st.round + 1, st.rounds)}/${st.rounds} | ${money(m.budget)}`;
 }
 
@@ -237,10 +252,11 @@ function renderAcademy() {
 
 function renderFinance() {
   const m = st.managed, f = m.finance;
-  const bal = f.tickets + f.transfers_in + f.prizes - f.salaries - f.transfers_out - f.upkeep - f.investments + f.bank_in - f.bank_paid + f.loan_fees;
-  $('#tab-financas').innerHTML = `<div class="cols"><div><table>
+  const bal = f.tickets + f.transfers_in + f.prizes - f.salaries - f.transfers_out - f.upkeep - f.investments + f.tv + f.bank_in - f.bank_paid + f.loan_fees;
+  $('#tab-financas').innerHTML = `${m.debtRounds ? `<p style="color:#c00;font-weight:bold">⚠️ Caixa negativo há ${m.debtRounds} rodada(s): juros de 1,5% por rodada, vendas forçadas a partir de 6 rodadas e demissão após 12.</p>` : ''}<div class="cols"><div><table>
     <tr><th colspan="2">Temporada ${st.season}</th></tr>
     <tr><td>Bilheteria</td><td>${money(f.tickets)}</td></tr>
+    <tr><td>Cotas de TV/patrocínio</td><td>${money(f.tv)}</td></tr>
     <tr><td>Vendas de jogadores</td><td>${money(f.transfers_in)}</td></tr>
     <tr><td>Premiações</td><td>${money(f.prizes)}</td></tr>
     <tr><td>Salários pagos</td><td>-${money(f.salaries)}</td></tr>
@@ -314,6 +330,7 @@ if (location.search.includes('selftest')) {
     const rn = JSON.parse(game.renew(pl.id, 2, +game.wage_demand(pl.id, 2)));
     if (!rn.ok) throw 'renovação: ' + rn.msg;
     out.push('contratos=ok');
+    if (JSON.parse(game.state()).managed.finance.tv === undefined) throw 'tv';
     localStorage.setItem(SAVE_KEY, game.save());
     game = FutManager.load(localStorage.getItem(SAVE_KEY));
     out.push('rodada_apos_load=' + JSON.parse(game.state()).round);
