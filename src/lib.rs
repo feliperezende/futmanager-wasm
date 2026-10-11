@@ -1237,6 +1237,12 @@ impl Game {
             "scorers": scorers.iter().take(15).map(|p| self.player_json(p)).collect::<Vec<_>>()})
     }
 
+    pub fn summary_json(&self) -> serde_json::Value {
+        let m = self.managed.map(|t| &self.teams[t]);
+        serde_json::json!({"team": m.map(|t| t.name.clone()).unwrap_or("Desempregado".into()), "division": m.map(|t| t.division + 1),
+            "season": self.season, "round": self.round, "budget": m.map(|t| t.budget)})
+    }
+
     pub fn market_json(&self, pos: &str, max_price: i64) -> serde_json::Value {
         let mut v: Vec<&Player> = self.players.iter().filter(|p| !p.retired && !p.academy && p.loan_from.is_none() && (p.team != self.managed || self.managed.is_none()))
             .filter(|p| pos.is_empty() || p.pos.label() == pos).filter(|p| self.buy_price(p.id) <= max_price).collect();
@@ -1262,6 +1268,8 @@ impl FutManager {
     }
     pub fn save(&self) -> String { serde_json::to_string(&self.g).unwrap() }
     pub fn state(&self) -> String { self.g.state_json().to_string() }
+    /// Resumo para a lista de saves (clube, temporada, rodada, caixa).
+    pub fn summary(&self) -> String { self.g.summary_json().to_string() }
     pub fn choose_team(&mut self, team: usize) -> String {
         if team >= self.g.teams.len() { return res(Err("Time inválido".into())); }
         if self.g.fired && !self.g.job_offers().contains(&team) { return res(Err("Esse clube não fez proposta".into())); }
@@ -1821,7 +1829,21 @@ mod tests {
     }
 
     #[test]
+    fn save_summary() {
+        let mut g = Game::new(101);
+        assert_eq!(g.summary_json()["team"], "Desempregado");
+        g.managed = Some(7);
+        g.play_round();
+        let s = g.summary_json();
+        assert_eq!(s["team"], g.teams[7].name.as_str());
+        assert_eq!(s["round"], 1);
+        assert_eq!(s["season"], 1);
+        assert_eq!(s["budget"], g.teams[7].budget);
+    }
+
+    #[test]
     fn save_load_roundtrip() {
+
 
 
 
@@ -1839,5 +1861,17 @@ mod tests {
         assert_eq!(h.round, 1);
         let a = g.play_round(); let b = h.play_round();
         assert_eq!(a.iter().map(|m| (m.hg, m.ag)).collect::<Vec<_>>(), b.iter().map(|m| (m.hg, m.ag)).collect::<Vec<_>>());
+    }
+}
+#[cfg(test)]
+mod size_probe {
+    #[test]
+    #[ignore]
+    fn save_size() {
+        let mut g = super::Game::new(1);
+        g.managed = Some(0);
+        println!("inicial {}", serde_json::to_string(&g).unwrap().len());
+        for _ in 0..super::ROUNDS * 3 { g.play_round(); }
+        println!("3 temporadas {}", serde_json::to_string(&g).unwrap().len());
     }
 }

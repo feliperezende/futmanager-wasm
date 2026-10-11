@@ -1,6 +1,9 @@
 import init, { FutManager } from '../pkg/futmanager.js';
 
-const SAVE_KEY = 'futmanager98_save';
+const SAVE_KEY = 'futmanager98_save'; // formato antigo (slot único)
+const SLOTS = 5;
+const slotKey = (n) => `futmanager98_slot_${n}`;
+const metaKey = (n) => `futmanager98_meta_${n}`;
 const $ = (s) => document.querySelector(s);
 const money = (v) => 'R$ ' + Math.round(v).toLocaleString('pt-BR');
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -10,7 +13,7 @@ function flash(r) { $('#msg').textContent = r.msg || r; $('#msg').style.color = 
 function refresh() { st = JSON.parse(game.state()); render(); }
 
 // ------------------------------------------------ Início
-function showStart() { $('#start').classList.remove('hidden'); $('#main').classList.add('hidden'); $('#pickTeam').classList.add('hidden'); }
+function showStart() { migrateLegacy(); $('#btnLoad').disabled = !anySave(); $('#start').classList.remove('hidden'); $('#main').classList.add('hidden'); $('#pickTeam').classList.add('hidden'); }
 $('#btnNew').onclick = () => {
   game = new FutManager(Math.floor(Math.random() * 1e9));
   st = JSON.parse(game.state());
@@ -26,13 +29,77 @@ function listTeams() {
     .map((t) => `<tr><td>${esc(t.name)}</td><td>${money(t.budget)}</td><td><button data-team="${t.id}">Assumir</button></td></tr>`).join('') + '</table>';
   $('#teamList').querySelectorAll('button').forEach((b) => b.onclick = () => { flash(JSON.parse(game.choose_team(+b.dataset.team))); enterGame(); });
 }
-$('#btnLoad').onclick = () => {
-  const s = localStorage.getItem(SAVE_KEY);
-  if (!s) return alert('Nenhum jogo salvo encontrado.');
-  try { game = FutManager.load(s); flash({ ok: true, msg: 'Jogo carregado.' }); enterGame(); } catch (e) { alert(e); }
-};
+$('#btnLoad').onclick = () => showSlots('load');
+
+// ------------------------------------------------ Saves (vários slots, compactados com gzip)
+async function pack(str) {
+  if (typeof CompressionStream === 'undefined') return str;
+  const buf = await new Response(new Blob([str]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return 'gz:' + btoa(bin);
+}
+async function unpack(data) {
+  if (!data.startsWith('gz:')) return data;
+  const bin = atob(data.slice(3));
+  const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  return await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+}
+function migrateLegacy() {
+  const old = localStorage.getItem(SAVE_KEY);
+  if (old && !localStorage.getItem(slotKey(1))) {
+    localStorage.setItem(slotKey(1), old);
+    localStorage.setItem(metaKey(1), JSON.stringify({ team: '(save antigo)', season: '?', round: '?', date: '' }));
+  }
+  if (old) localStorage.removeItem(SAVE_KEY);
+}
+function slotMeta(n) { try { return JSON.parse(localStorage.getItem(metaKey(n))); } catch (e) { return null; } }
+function anySave() { for (let n = 1; n <= SLOTS; n++) if (localStorage.getItem(slotKey(n))) return true; return false; }
+async function saveSlot(n) {
+  const data = await pack(game.save());
+  const meta = { ...JSON.parse(game.summary()), date: new Date().toLocaleString('pt-BR') };
+  try {
+    localStorage.setItem(slotKey(n), data);
+    localStorage.setItem(metaKey(n), JSON.stringify(meta));
+  } catch (e) { flash({ ok: false, msg: 'Sem espaço no navegador para salvar: apague outro slot.' }); return false; }
+  flash({ ok: true, msg: `Jogo salvo no slot ${n}.` });
+  return true;
+}
+async function loadSlot(n) {
+  const data = localStorage.getItem(slotKey(n));
+  if (!data) throw new Error('Slot vazio');
+  game = FutManager.load(await unpack(data));
+}
+function showSlots(mode) {
+  migrateLegacy();
+  $('#slotsTitle').textContent = mode === 'save' ? 'Salvar jogo' : 'Carregar jogo';
+  let html = '<table><tr><th>Slot</th><th>Clube</th><th>Temporada/Rodada</th><th>Caixa</th><th>Salvo em</th><th></th></tr>';
+  for (let n = 1; n <= SLOTS; n++) {
+    const m = localStorage.getItem(slotKey(n)) ? (slotMeta(n) || { team: '?' }) : null;
+    html += `<tr><td>${n}</td><td>${m ? esc(m.team) : '<i>(vazio)</i>'}</td><td>${m ? `T${m.season} / R${m.round}` : ''}</td><td>${m && m.budget != null ? money(m.budget) : ''}</td><td>${m ? esc(m.date || '') : ''}</td><td>
+      ${mode === 'save' ? `<button data-save="${n}">Salvar aqui</button>` : `<button data-load="${n}" ${m ? '' : 'disabled'}>Carregar</button>`}
+      ${m ? `<button data-del="${n}">Apagar</button>` : ''}</td></tr>`;
+  }
+  $('#slotsBody').innerHTML = html + '</table>';
+  $('#slots').classList.remove('hidden');
+  document.querySelectorAll('[data-save]').forEach((b) => b.onclick = async () => {
+    const n = +b.dataset.save;
+    if (localStorage.getItem(slotKey(n)) && !confirm(`Sobrescrever o slot ${n}?`)) return;
+    if (await saveSlot(n)) $('#slots').classList.add('hidden');
+  });
+  document.querySelectorAll('[data-load]').forEach((b) => b.onclick = async () => {
+    try { await loadSlot(+b.dataset.load); $('#slots').classList.add('hidden'); flash({ ok: true, msg: 'Jogo carregado.' }); enterGame(); } catch (e) { alert(e); }
+  });
+  document.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => {
+    const n = +b.dataset.del;
+    if (!confirm(`Apagar o slot ${n}?`)) return;
+    localStorage.removeItem(slotKey(n)); localStorage.removeItem(metaKey(n)); showSlots(mode);
+  });
+}
+$('#slotsClose').onclick = () => $('#slots').classList.add('hidden');
 function enterGame() { $('#start').classList.add('hidden'); $('#main').classList.remove('hidden'); tab = 'clube'; refresh(); }
-$('#btnSave').onclick = () => { localStorage.setItem(SAVE_KEY, game.save()); flash({ ok: true, msg: 'Jogo salvo no navegador.' }); };
+$('#btnSave').onclick = () => showSlots('save');
 $('#btnQuit').onclick = () => { if (confirm('Voltar ao menu? Progresso não salvo será perdido.')) showStart(); };
 document.querySelectorAll('.menubar [data-tab]').forEach((b) => b.onclick = () => { if (!playing) { tab = b.dataset.tab; render(); } });
 
@@ -189,9 +256,10 @@ function renderSubs(mm) {
   if (!mm || mm.minute >= 90) { box.innerHTML = ''; subsKey = ''; return; }
   const side = mm.home === st.managed.id ? 0 : 1;
   const on = mm.on[side], bench = mm.bench[side];
-  const key = on.map((p) => p.id).join(',') + '|' + bench.map((p) => p.id).join(',') + '|' + mm.subs[side];
+  const key = on.map((p) => p.id).join(',') + '|' + bench.map((p) => p.id).join(',') + '|' + mm.subs[side] + '|' + Math.floor(mm.minute / 10);
   if (key === subsKey) return;
   subsKey = key;
+  const prevOut = document.getElementById('subOut')?.value, prevIn = document.getElementById('subIn')?.value;
   const opt = (p) => `<option value="${p.id}">${p.pos} ${esc(p.name)} (${p.skill}${mm.energy && mm.energy[p.id] !== undefined ? ', ' + Math.round(mm.energy[p.id]) + '% energia' : ''})</option>`;
   box.innerHTML = `<fieldset><legend>Substituições (${mm.subs[side]}/3)</legend>
     Sai: <select id="subOut">${on.map(opt).join('')}</select>
@@ -201,6 +269,8 @@ function renderSubs(mm) {
     <label><input type="checkbox" id="livePress" ${st.managed.pressing ? 'checked' : ''}> Pressão</label></fieldset>`;
   const lt = () => { flash(JSON.parse(game.set_tactic($('#liveMent').value, $('#livePress').checked))); st = JSON.parse(game.state()); };
   $('#liveMent').onchange = lt; $('#livePress').onchange = lt;
+  if (prevOut && on.some((p) => String(p.id) === prevOut)) $('#subOut').value = prevOut;
+  if (prevIn && bench.some((p) => String(p.id) === prevIn)) $('#subIn').value = prevIn;
   $('#btnSub').onclick = () => {
     const r = JSON.parse(game.substitute(+$('#subOut').value, +$('#subIn').value));
     flash(r); showLive(JSON.parse(game.live()));
@@ -290,10 +360,9 @@ function renderFinance() {
 
 await init();
 showStart();
-if (!localStorage.getItem(SAVE_KEY)) $('#btnLoad').disabled = true;
 
 // Autoteste opcional: abra index.html?selftest para validar o motor no navegador.
-if (location.search.includes('selftest')) {
+if (location.search.includes('selftest')) (async () => {
   const out = [];
   try {
     $('#btnNew').click();
@@ -331,12 +400,27 @@ if (location.search.includes('selftest')) {
     if (!rn.ok) throw 'renovação: ' + rn.msg;
     out.push('contratos=ok');
     if (JSON.parse(game.state()).managed.finance.tv === undefined) throw 'tv';
-    localStorage.setItem(SAVE_KEY, game.save());
-    game = FutManager.load(localStorage.getItem(SAVE_KEY));
+    const teamName = st.managed.name;
+    await saveSlot(2);
+    if (slotMeta(2).team !== teamName) throw 'meta do slot';
+    if (!localStorage.getItem(slotKey(2)).startsWith('gz:')) throw 'save não compactado';
+    game = new FutManager(1);
+    await loadSlot(2);
+    if (JSON.parse(game.summary()).team !== teamName) throw 'load slot';
+    localStorage.removeItem(slotKey(2)); localStorage.removeItem(metaKey(2));
+    out.push('slots=ok');
     out.push('rodada_apos_load=' + JSON.parse(game.state()).round);
     for (let i = 0; i < 29; i++) game.play_round();
     out.push('temporada=' + JSON.parse(game.state()).season);
     out.push('SELFTEST_OK');
   } catch (e) { out.push('SELFTEST_FAIL ' + e); }
   document.body.insertAdjacentHTML('beforeend', `<pre id="selftest">${out.join(' | ')}</pre>`);
+})();
+
+// Demonstração: index.html?demo inicia um jogo e começa uma rodada ao vivo.
+if (location.search.includes('demo')) {
+  $('#btnNew').click();
+  document.querySelector('#teamList button').click();
+  tab = 'jogos'; render();
+  $('#btnPlay').click();
 }

@@ -24,3 +24,4 @@ tr.down td:first-child{border-left:4px solid #c00}
 .big{font-size:18px;font-weight:bold}
 .pos-G{color:#a06000}.pos-D{color:#0050a0}.pos-M{color:#007000}.pos-A{color:#b00000}
 fieldset{border:2px groove #fff;margin-bottom:8px}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center}.modal .window{min-width:520px}
