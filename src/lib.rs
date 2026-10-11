@@ -44,6 +44,38 @@ pub struct Player {
     pub salary: i64, // R$ por rodada
     pub team: Option<usize>,
     pub goals: i32,
+    /// Cartões amarelos acumulados (3 = suspensão automática)
+    #[serde(default)]
+    pub yellows: u8,
+    /// Jogos de suspensão a cumprir
+    #[serde(default)]
+    pub suspended: u8,
+    /// Rodadas de lesão restantes
+    #[serde(default)]
+    pub injured: u8,
+}
+
+impl Player {
+    pub fn available(&self) -> bool { self.injured == 0 && self.suspended == 0 }
+}
+
+/// Partida em andamento (simulada minuto a minuto).
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct LiveMatch {
+    pub division: usize,
+    pub home: usize,
+    pub away: usize,
+    pub on: [Vec<usize>; 2],
+    pub hg: u32,
+    pub ag: u32,
+    pub minute: u32,
+    pub events: Vec<Event>,
+    /// amarelados nesta partida
+    pub booked: Vec<usize>,
+    /// expulsões: (jogador, jogos de suspensão)
+    pub reds: Vec<(usize, u8)>,
+    /// lesões: (jogador, rodadas)
+    pub injuries: Vec<(usize, u8)>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -91,6 +123,8 @@ pub struct Game {
     pub finance: Finance, // acumulado da temporada do clube gerenciado
     pub news: Vec<String>,
     pub last_results: Vec<MatchResult>,
+    #[serde(default)]
+    pub live: Vec<LiveMatch>,
 }
 
 pub const FORMATIONS: [&str; 5] = ["4-4-2", "4-3-3", "3-5-2", "5-3-2", "4-5-1"];
@@ -149,7 +183,7 @@ impl Game {
             }
         }
         let mut g = Game { rng, season: 1, round: 0, teams, players, schedule: vec![], managed: None,
-            finance: Finance::default(), news: vec![], last_results: vec![] };
+            finance: Finance::default(), news: vec![], last_results: vec![], live: vec![] };
         g.refill_free_agents();
         g.build_schedule();
         for t in 0..g.teams.len() { g.auto_lineup(t); }
@@ -158,7 +192,8 @@ impl Game {
 
     fn gen_player(rng: &mut Rng, id: usize, pos: Pos, base: i32, team: Option<usize>) -> Player {
         let skill = (base + rng.range(-10, 10) as i32).clamp(15, 95);
-        Player { id, name: gen_player_name(rng), pos, skill, age: rng.range(17, 34) as i32, salary: salary_for(skill), team, goals: 0 }
+        Player { id, name: gen_player_name(rng), pos, skill, age: rng.range(17, 34) as i32, salary: salary_for(skill), team, goals: 0,
+            yellows: 0, suspended: 0, injured: 0 }
     }
 
     fn refill_free_agents(&mut self) {
@@ -209,7 +244,7 @@ impl Game {
 
     pub fn auto_lineup(&mut self, team: usize) {
         let (d, m, a) = formation_counts(&self.teams[team].formation).unwrap_or((4, 4, 2));
-        let mut sq = self.squad(team);
+        let mut sq: Vec<usize> = self.squad(team).into_iter().filter(|&id| self.players[id].available()).collect();
         sq.sort_by_key(|&id| -self.players[id].skill);
         let mut chosen = Vec::new();
         for (pos, n) in [(Pos::G, 1), (Pos::D, d), (Pos::M, m), (Pos::A, a)] {
@@ -227,6 +262,7 @@ impl Game {
         for &id in ids {
             if id >= self.players.len() || self.players[id].team != Some(team) { return Err("Jogador não pertence ao clube".into()); }
             if !seen.insert(id) { return Err("Jogador repetido".into()); }
+            if !self.players[id].available() { return Err(format!("{} está lesionado ou suspenso", self.players[id].name)); }
         }
         if ids.iter().filter(|&&id| self.players[id].pos == Pos::G).count() != 1 { return Err("Escale exatamente 1 goleiro".into()); }
         self.teams[team].formation = formation.to_string();
@@ -236,13 +272,16 @@ impl Game {
 
     fn lineup_valid(&self, team: usize) -> bool {
         let l = &self.teams[team].lineup;
-        l.len() == 11 && l.iter().all(|&id| self.players[id].team == Some(team))
+        l.len() == 11 && l.iter().all(|&id| self.players[id].team == Some(team) && self.players[id].available())
     }
 
     /// (ataque, defesa) do time escalado.
-    pub fn strength(&self, team: usize) -> (f64, f64) {
+    pub fn strength(&self, team: usize) -> (f64, f64) { self.strength_of(&self.teams[team].lineup) }
+
+    /// (ataque, defesa) de um conjunto de jogadores em campo.
+    pub fn strength_of(&self, ids: &[usize]) -> (f64, f64) {
         let (mut atk, mut def) = (0.0, 0.0);
-        for &id in &self.teams[team].lineup {
+        for &id in ids {
             let p = &self.players[id];
             let s = p.skill as f64;
             match p.pos { Pos::G => def += 2.5 * s, Pos::D => { def += s; atk += 0.15 * s } Pos::M => { def += 0.5 * s; atk += 0.6 * s } Pos::A => atk += s }
@@ -250,64 +289,125 @@ impl Game {
         (atk.max(1.0), def.max(1.0))
     }
 
-    pub fn simulate_match(&mut self, div: usize, home: usize, away: usize) -> MatchResult {
-        let (ah, dh) = self.strength(home);
-        let (aa, da) = self.strength(away);
+    /// Avança um minuto de uma partida ao vivo.
+    fn step_match(&mut self, m: &mut LiveMatch) {
+        if m.minute >= 90 { return; }
+        m.minute += 1;
+        let minute = m.minute;
+        let (ah, dh) = self.strength_of(&m.on[0]);
+        let (aa, da) = self.strength_of(&m.on[1]);
         // normaliza: um time "médio" tem ataque ~ 0.55*defesa
         let ph = 0.0125 * ((ah / da) / 0.55).powf(1.6) * 1.12;
         let pa = 0.0125 * ((aa / dh) / 0.55).powf(1.6);
-        let (mut hg, mut ag) = (0u32, 0u32);
-        let mut events = Vec::new();
-        for minute in 1..=90u32 {
-            for (side, p) in [(0u8, ph), (1u8, pa)] {
-                let r = self.rng.f64();
-                let team = if side == 0 { home } else { away };
-                if r < p {
-                    let scorer = self.pick_scorer(team);
-                    self.players[scorer].goals += 1;
-                    if side == 0 { hg += 1 } else { ag += 1 }
-                    events.push(Event { minute, side, kind: "gol".into(), text: format!("GOOOL! {} ({})", self.players[scorer].name, self.teams[team].name) });
-                } else if r < p * 3.0 {
-                    let pl = self.pick_scorer(team);
-                    let t = *self.rng.pick(&["chuta para fora", "acerta a trave!", "obriga o goleiro a fazer grande defesa", "cabeceia por cima"]);
-                    events.push(Event { minute, side, kind: "chance".into(), text: format!("{} {}", self.players[pl].name, t) });
-                } else if r < p * 3.0 + 0.002 {
-                    let l = &self.teams[team].lineup;
-                    let pl = l[self.rng.range(0, l.len() as i64 - 1) as usize];
-                    events.push(Event { minute, side, kind: "cartao".into(), text: format!("Cartão amarelo para {}", self.players[pl].name) });
+        for (side, p) in [(0usize, ph), (1usize, pa)] {
+            if m.on[side].is_empty() { continue; }
+            let r = self.rng.f64();
+            let team = if side == 0 { m.home } else { m.away };
+            let ev = |kind: &str, text: String| Event { minute, side: side as u8, kind: kind.into(), text };
+            if r < p {
+                let scorer = self.pick_scorer(&m.on[side]);
+                self.players[scorer].goals += 1;
+                if side == 0 { m.hg += 1 } else { m.ag += 1 }
+                m.events.push(ev("gol", format!("GOOOL! {} ({})", self.players[scorer].name, self.teams[team].name)));
+            } else if r < p * 3.0 {
+                let pl = self.pick_scorer(&m.on[side]);
+                let t = *self.rng.pick(&["chuta para fora", "acerta a trave!", "obriga o goleiro a fazer grande defesa", "cabeceia por cima"]);
+                m.events.push(ev("chance", format!("{} {}", self.players[pl].name, t)));
+            } else if r < p * 3.0 + 0.0045 {
+                let pl = *self.rng.pick(&m.on[side]);
+                let name = self.players[pl].name.clone();
+                let direct = self.rng.f64() < 0.07;
+                if direct || m.booked.contains(&pl) {
+                    m.on[side].retain(|&x| x != pl);
+                    m.reds.push((pl, if direct { 2 } else { 1 }));
+                    m.events.push(ev("vermelho", if direct { format!("Cartão VERMELHO direto para {name}!") } else { format!("Segundo amarelo: {name} expulso!") }));
+                } else {
+                    m.booked.push(pl);
+                    m.events.push(ev("cartao", format!("Cartão amarelo para {name}")));
                 }
+            } else if r < p * 3.0 + 0.0045 + 0.0011 {
+                let pl = *self.rng.pick(&m.on[side]);
+                let rounds = self.rng.range(1, 5) as u8;
+                m.on[side].retain(|&x| x != pl);
+                m.injuries.push((pl, rounds));
+                m.events.push(ev("lesao", format!("{} se lesiona e deixa o campo ({} rodada(s) fora)", self.players[pl].name, rounds)));
             }
         }
-        // bilheteria
-        let (sh, _) = (ah + dh, 0);
-        let fill = (0.45 + (sh / 1200.0 - 0.5) + 0.03 * self.teams[home].stats.pts as f64 / (self.teams[home].stats.p.max(1) as f64)).clamp(0.2, 1.0);
-        let attendance = (self.teams[home].capacity as f64 * fill * (0.9 + 0.2 * self.rng.f64())).min(self.teams[home].capacity as f64) as i64;
-        MatchResult { division: div, home, away, hg, ag, attendance, events }
     }
 
-    fn pick_scorer(&mut self, team: usize) -> usize {
-        let l = self.teams[team].lineup.clone();
+    fn attendance(&mut self, home: usize) -> i64 {
+        let (a, d) = self.strength(home);
+        let s = &self.teams[home].stats;
+        let fill = (0.45 + ((a + d) / 1200.0 - 0.5) + 0.03 * s.pts as f64 / (s.p.max(1) as f64)).clamp(0.2, 1.0);
+        let cap = self.teams[home].capacity as f64;
+        (cap * fill * (0.9 + 0.2 * self.rng.f64())).min(cap) as i64
+    }
+
+    fn pick_scorer(&mut self, on: &[usize]) -> usize {
+        let l = on.to_vec();
         let w: Vec<f64> = l.iter().map(|&id| match self.players[id].pos { Pos::G => 0.02, Pos::D => 1.0, Pos::M => 3.0, Pos::A => 6.0 } * self.players[id].skill as f64).collect();
         let mut r = self.rng.f64() * w.iter().sum::<f64>();
         for (i, x) in w.iter().enumerate() { if r < *x { return l[i]; } r -= x; }
         *l.last().unwrap()
     }
 
-    /// Joga a rodada atual em todas as divisões. Ao fim da última rodada, encerra a temporada.
+    /// Joga a rodada inteira de uma vez. Ao fim da última rodada, encerra a temporada.
     pub fn play_round(&mut self) -> Vec<MatchResult> {
+        self.start_round();
+        while self.step() {}
+        self.finish_round()
+    }
+
+    /// Inicia a rodada: escala os times e cria as partidas ao vivo.
+    pub fn start_round(&mut self) {
+        if !self.live.is_empty() { return; }
         if self.round >= ROUNDS { self.end_season(); }
         self.news.clear();
         self.ai_transfers();
         for t in 0..self.teams.len() {
             if Some(t) != self.managed || !self.lineup_valid(t) { self.auto_lineup(t); }
         }
-        let mut results = Vec::new();
         for div in 0..DIVISIONS {
             for (h, a) in self.schedule[div][self.round].clone() {
-                let r = self.simulate_match(div, h, a);
-                self.apply_result(&r);
-                results.push(r);
+                let on = [self.teams[h].lineup.clone(), self.teams[a].lineup.clone()];
+                self.live.push(LiveMatch { division: div, home: h, away: a, on, ..Default::default() });
             }
+        }
+    }
+
+    /// Avança um minuto em todas as partidas. Retorna false quando acabaram.
+    pub fn step(&mut self) -> bool {
+        if self.live.is_empty() || self.live[0].minute >= 90 { return false; }
+        let mut live = std::mem::take(&mut self.live);
+        for m in live.iter_mut() { self.step_match(m); }
+        self.live = live;
+        true
+    }
+
+    /// Encerra a rodada: aplica resultados, cartões, lesões e finanças.
+    pub fn finish_round(&mut self) -> Vec<MatchResult> {
+        while self.step() {}
+        let live = std::mem::take(&mut self.live);
+        if live.is_empty() { return vec![]; }
+        // suspensões cumpridas e recuperação de lesões
+        for p in self.players.iter_mut() {
+            if p.team.is_some() && p.suspended > 0 { p.suspended -= 1; }
+            if p.injured > 0 { p.injured -= 1; }
+        }
+        let mut results = Vec::new();
+        for m in live {
+            for &pl in &m.booked {
+                if m.reds.iter().any(|r| r.0 == pl) { continue; }
+                let p = &mut self.players[pl];
+                p.yellows += 1;
+                if p.yellows >= 3 { p.yellows = 0; p.suspended += 1; self.news.push(format!("{} cumprirá suspensão por 3 amarelos", p.name)); }
+            }
+            for &(pl, n) in &m.reds { self.players[pl].suspended += n; }
+            for &(pl, n) in &m.injuries { self.players[pl].injured = self.players[pl].injured.max(n); }
+            let attendance = self.attendance(m.home);
+            let r = MatchResult { division: m.division, home: m.home, away: m.away, hg: m.hg, ag: m.ag, attendance, events: m.events };
+            self.apply_result(&r);
+            results.push(r);
         }
         // salários
         for t in 0..self.teams.len() {
@@ -443,7 +543,17 @@ impl Game {
     fn player_json(&self, p: &Player) -> serde_json::Value {
         serde_json::json!({"id": p.id, "name": p.name, "pos": p.pos.label(), "skill": p.skill, "age": p.age, "salary": p.salary,
             "value": player_value(p), "team": p.team, "teamName": p.team.map(|t| self.teams[t].name.clone()).unwrap_or("Sem clube".into()),
-            "goals": p.goals, "buyPrice": self.buy_price(p.id), "sellPrice": self.sell_price(p.id)})
+            "goals": p.goals, "buyPrice": self.buy_price(p.id), "sellPrice": self.sell_price(p.id),
+            "yellows": p.yellows, "suspended": p.suspended, "injured": p.injured})
+    }
+
+    /// Estado das partidas ao vivo de uma divisão.
+    pub fn live_json(&self, div: usize) -> serde_json::Value {
+        serde_json::Value::Array(self.live.iter().filter(|m| m.division == div).map(|m| serde_json::json!({
+            "home": m.home, "away": m.away, "homeName": self.teams[m.home].name, "awayName": self.teams[m.away].name,
+            "hg": m.hg, "ag": m.ag, "minute": m.minute, "events": m.events,
+            "on": [m.on[0].iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>(),
+                   m.on[1].iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>()]})).collect())
     }
 
     pub fn state_json(&self) -> serde_json::Value {
@@ -465,7 +575,7 @@ impl Game {
         let teams: Vec<_> = self.teams.iter().map(|t| serde_json::json!({"id": t.id, "name": t.name, "division": t.division, "budget": t.budget})).collect();
         let mut scorers: Vec<&Player> = self.players.iter().filter(|p| p.goals > 0).collect();
         scorers.sort_by_key(|p| -p.goals);
-        serde_json::json!({"season": self.season, "round": self.round, "rounds": ROUNDS, "tables": tables, "next": next,
+        serde_json::json!({"season": self.season, "round": self.round, "rounds": ROUNDS, "tables": tables, "next": next, "liveActive": !self.live.is_empty(),
             "managed": managed, "teams": teams, "news": self.news, "formations": FORMATIONS,
             "scorers": scorers.iter().take(15).map(|p| self.player_json(p)).collect::<Vec<_>>()})
     }
@@ -516,6 +626,20 @@ impl FutManager {
         let Some(m) = self.g.managed else { return res(Err("Nenhum time".into())) };
         self.g.teams[m].ticket_price = (price as i64).clamp(1, 500);
         res(Ok("Preço do ingresso atualizado".into()))
+    }
+    /// Inicia a rodada ao vivo; avance com `step` e finalize com `finish_round`.
+    pub fn start_round(&mut self) -> String { self.g.start_round(); self.live() }
+    /// Avança `n` minutos e devolve as partidas da divisão do clube gerenciado.
+    pub fn step(&mut self, n: u32) -> String { for _ in 0..n { if !self.g.step() { break; } } self.live() }
+    pub fn live(&self) -> String {
+        let div = self.g.managed.map(|m| self.g.teams[m].division).unwrap_or(0);
+        self.g.live_json(div).to_string()
+    }
+    pub fn finish_round(&mut self) -> String { let r = self.g.finish_round(); self.results_json(&r) }
+    fn results_json(&self, r: &[MatchResult]) -> String {
+        let names = |t: usize| self.g.teams[t].name.clone();
+        serde_json::Value::Array(r.iter().map(|m| serde_json::json!({"division": m.division, "home": m.home, "away": m.away,
+            "homeName": names(m.home), "awayName": names(m.away), "hg": m.hg, "ag": m.ag, "attendance": m.attendance, "events": m.events})).collect()).to_string()
     }
     pub fn play_round(&mut self) -> String {
         let r = self.g.play_round();
@@ -644,7 +768,56 @@ mod tests {
     }
 
     #[test]
+    fn suspended_and_injured_players_unavailable() {
+        let mut g = Game::new(21);
+        let best = *g.teams[0].lineup.iter().find(|&&id| g.players[id].pos != Pos::G).unwrap();
+        g.players[best].suspended = 1;
+        g.auto_lineup(0);
+        assert!(!g.teams[0].lineup.contains(&best));
+        let mut l = g.teams[0].lineup.clone();
+        let i = l.iter().position(|&id| g.players[id].pos != Pos::G).unwrap();
+        l[i] = best;
+        assert!(g.set_lineup(0, &g.teams[0].formation.clone(), &l).is_err());
+        let inj = g.teams[0].lineup[1];
+        g.players[inj].injured = 2;
+        g.play_round();
+        assert_eq!(g.players[best].suspended, 0, "suspensão cumprida");
+        assert_eq!(g.players[inj].injured, 1);
+        assert!(g.live.is_empty());
+    }
+
+    #[test]
+    fn cards_accumulate_and_reds_suspend() {
+        let mut g = Game::new(22);
+        g.start_round();
+        let (y, r, i) = (g.live[0].on[0][1], g.live[0].on[0][2], g.live[0].on[0][3]);
+        g.players[y].yellows = 2;
+        g.live[0].booked.push(y);
+        g.live[0].reds.push((r, 2));
+        g.live[0].injuries.push((i, 3));
+        g.finish_round();
+        assert_eq!(g.players[y].suspended, 1);
+        assert_eq!(g.players[y].yellows, 0);
+        assert_eq!(g.players[r].suspended, 2);
+        assert_eq!(g.players[i].injured, 3);
+        g.play_round();
+        assert_eq!(g.players[r].suspended, 1);
+        assert_eq!(g.players[i].injured, 2);
+    }
+
+    #[test]
+    fn season_produces_cards_and_injuries() {
+        let mut g = Game::new(23);
+        let (mut cards, mut reds, mut inj) = (0, 0, 0);
+        for _ in 0..ROUNDS {
+            for m in g.play_round() { for e in m.events { match e.kind.as_str() { "cartao" => cards += 1, "vermelho" => reds += 1, "lesao" => inj += 1, _ => {} } } }
+        }
+        assert!(cards > 100 && reds > 3 && inj > 10, "cartões {cards}, vermelhos {reds}, lesões {inj}");
+    }
+
+    #[test]
     fn save_load_roundtrip() {
+
         let mut g = Game::new(13);
         g.managed = Some(3);
         g.play_round();

@@ -19,7 +19,7 @@ tr.down td:first-child{border-left:4px solid #c00}
 .cols{display:flex;gap:10px;flex-wrap:wrap}.cols>div{flex:1;min-width:320px}
 .msg{padding:4px 10px;min-height:18px;color:#000080;font-weight:bold}
 .ticker{background:#000;color:#0f0;font-family:"Courier New",monospace;height:260px;overflow:auto;padding:6px;border:2px inset #808080}
-.ticker .gol{color:#ff0;font-weight:bold}
+.ticker .gol{color:#ff0;font-weight:bold}.ticker .vermelho{color:#f44;font-weight:bold}.ticker .lesao{color:#f80}.ticker .cartao{color:#ee8}.ticker .sub{color:#8cf}
 .clock{font-family:"Courier New",monospace;font-size:28px;background:#000;color:#f00;display:inline-block;padding:2px 10px;margin:6px 0}
 .big{font-size:18px;font-weight:bold}
 .pos-G{color:#a06000}.pos-D{color:#0050a0}.pos-M{color:#007000}.pos-A{color:#b00000}

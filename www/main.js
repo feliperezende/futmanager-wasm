@@ -46,8 +46,11 @@ function render() {
   ({ clube: renderClub, jogos: renderRound, tabela: renderTable, mercado: renderMarket, financas: renderFinance })[tab]();
 }
 
+function status(p) {
+  return (p.injured ? `🚑${p.injured} ` : '') + (p.suspended ? `🟥${p.suspended} ` : '') + (p.yellows ? `🟨${p.yellows}` : '');
+}
 function playerRow(p, extra) {
-  return `<td class="pos-${p.pos}">${p.pos}</td><td>${esc(p.name)}</td><td>${p.skill}</td><td>${p.age}</td><td>${money(p.salary)}</td><td>${money(p.value)}</td>${extra}`;
+  return `<td class="pos-${p.pos}">${p.pos}</td><td>${esc(p.name)} <small>${status(p)}</small></td><td>${p.skill}</td><td>${p.age}</td><td>${money(p.salary)}</td><td>${money(p.value)}</td>${extra}`;
 }
 
 function renderClub() {
@@ -90,51 +93,59 @@ function renderRound() {
   $('#tab-jogos').innerHTML = `
     <div>${st.news.map((n) => `<div>📰 ${esc(n)}</div>`).join('')}</div>
     <p class="big">Próximo jogo: ${myGame ? `${esc(myGame.homeName)} x ${esc(myGame.awayName)}` : '—'}</p>
-    <button id="btnPlay">▶ Jogar rodada</button> <button id="btnSkip" class="hidden">⏩ Pular para o fim</button>
+    <button id="btnPlay">▶ Jogar rodada</button> <button id="btnPause" class="hidden">⏸ Pausar</button> <button id="btnSkip" class="hidden">⏩ Pular para o fim</button>
     <div class="clock" id="clock">00'</div>
     <div class="cols"><div><table id="scoreboard"><tr><th>Mandante</th><th></th><th>Visitante</th></tr>
       ${mine.map((x) => `<tr class="${x === myGame ? 'me' : ''}"><td>${esc(x.homeName)}</td><td id="sc-${x.home}">- x -</td><td>${esc(x.awayName)}</td></tr>`).join('')}
-    </table></div><div><div class="ticker" id="ticker">Aguardando o apito inicial...</div></div></div>`;
-  $('#btnPlay').onclick = playRound;
+    </table><div id="subs"></div></div><div><div class="ticker" id="ticker">Aguardando o apito inicial...</div></div></div>`;
+  $('#btnPlay').onclick = () => { game.start_round(); runLive(); };
+  if (st.liveActive) runLive();
 }
 
-function playRound() {
-  if (playing) return;
-  const m = st.managed, div = m.division, myId = m.id;
-  const results = JSON.parse(game.play_round());
-  const mine = results.filter((r) => r.division === div);
-  const myMatch = mine.find((r) => r.home === myId || r.away === myId);
-  playing = true;
-  $('#btnPlay').disabled = true; $('#btnSkip').classList.remove('hidden');
-  $('#ticker').innerHTML = '';
-  let minute = 0, timer;
-  const show = (upto) => {
-    $('#clock').textContent = String(upto).padStart(2, '0') + "'";
-    for (const r of mine) {
-      const g = r.events.filter((e) => e.kind === 'gol' && e.minute <= upto);
-      const cell = document.getElementById('sc-' + r.home);
-      if (cell) cell.textContent = `${g.filter((e) => e.side === 0).length} x ${g.filter((e) => e.side === 1).length}`;
-    }
-    const lines = [];
-    for (const r of mine) for (const e of r.events) {
-      if (e.minute > upto) continue;
-      if (r === myMatch || e.kind === 'gol') lines.push({ e, r });
-    }
-    lines.sort((a, b) => b.e.minute - a.e.minute);
-    $('#ticker').innerHTML = lines.map(({ e, r }) => `<div class="${e.kind}">${String(e.minute).padStart(2, '0')}' ${r === myMatch ? '' : '[' + esc(r.homeName) + ' x ' + esc(r.awayName) + '] '}${esc(e.text)}</div>`).join('');
-  };
-  const finish = () => {
-    clearInterval(timer); show(90); playing = false;
-    const att = myMatch ? `Público: ${myMatch.attendance.toLocaleString('pt-BR')}` : '';
-    st = JSON.parse(game.state());
-    $('#ticker').insertAdjacentHTML('afterbegin', `<div class="gol">FIM DE JOGO! ${att}</div>${st.news.map((n) => `<div>📰 ${esc(n)}</div>`).join('')}`);
-    $('#btnSkip').classList.add('hidden');
-    $('#btnPlay').disabled = false; $('#btnPlay').textContent = '▶ Próxima rodada';
-    $('#btnPlay').onclick = () => { render(); };
-    $('#status').textContent = `${st.managed.name} | Div ${st.managed.division + 1} | Temporada ${st.season} | Rodada ${Math.min(st.round + 1, st.rounds)}/${st.rounds} | ${money(st.managed.budget)}`;
-  };
-  $('#btnSkip').onclick = finish;
-  timer = setInterval(() => { minute++; show(minute); if (minute >= 90) finish(); }, 100);
+let liveTimer = null, paused = false;
+function showLive(live) {
+  const myId = st.managed.id;
+  const myMatch = live.find((r) => r.home === myId || r.away === myId);
+  const minute = live.length ? live[0].minute : 0;
+  $('#clock').textContent = String(minute).padStart(2, '0') + "'";
+  for (const r of live) { const c = document.getElementById('sc-' + r.home); if (c) c.textContent = `${r.hg} x ${r.ag}`; }
+  const lines = [];
+  for (const r of live) for (const e of r.events) if (r === myMatch || e.kind === 'gol') lines.push({ e, r });
+  lines.sort((a, b) => b.e.minute - a.e.minute);
+  $('#ticker').innerHTML = lines.map(({ e, r }) => `<div class="${e.kind}">${String(e.minute).padStart(2, '0')}' ${r === myMatch ? '' : '[' + esc(r.homeName) + ' x ' + esc(r.awayName) + '] '}${esc(e.text)}</div>`).join('');
+  if (typeof renderSubs === 'function') renderSubs(myMatch);
+  return minute;
+}
+function runLive() {
+  playing = true; paused = false;
+  $('#btnPlay').disabled = true; $('#btnSkip').classList.remove('hidden'); $('#btnPause').classList.remove('hidden');
+  $('#btnPause').textContent = '⏸ Pausar';
+  $('#btnPause').onclick = () => { paused = !paused; $('#btnPause').textContent = paused ? '▶ Continuar' : '⏸ Pausar'; };
+  $('#btnSkip').onclick = () => { showLive(JSON.parse(game.step(90))); finishLive(); };
+  showLive(JSON.parse(game.live()));
+  clearInterval(liveTimer);
+  liveTimer = setInterval(() => {
+    if (paused) return;
+    if (showLive(JSON.parse(game.step(1))) >= 90) finishLive();
+  }, 100);
+}
+function finishLive() {
+  clearInterval(liveTimer);
+  const results = JSON.parse(game.finish_round());
+  playing = false;
+  const myMatch = results.find((r) => r.home === st.managed.id || r.away === st.managed.id);
+  const att = myMatch ? `Público: ${myMatch.attendance.toLocaleString('pt-BR')}` : '';
+  st = JSON.parse(game.state());
+  $('#ticker').insertAdjacentHTML('afterbegin', `<div class="gol">FIM DE JOGO! ${att}</div>${st.news.map((n) => `<div>📰 ${esc(n)}</div>`).join('')}`);
+  $('#btnSkip').classList.add('hidden'); $('#btnPause').classList.add('hidden');
+  if (document.getElementById('subs')) $('#subs').innerHTML = '';
+  $('#btnPlay').disabled = false; $('#btnPlay').textContent = '▶ Próxima rodada';
+  $('#btnPlay').onclick = () => { render(); };
+  setStatus();
+}
+function setStatus() {
+  const m = st.managed;
+  $('#status').textContent = `${m.name} | Div ${m.division + 1} | Temporada ${st.season} | Rodada ${Math.min(st.round + 1, st.rounds)}/${st.rounds} | ${money(m.budget)}`;
 }
 
 let tableDiv = null;
@@ -194,7 +205,10 @@ if (location.search.includes('selftest')) {
     $('#btnNew').click();
     document.querySelector('#teamList button').click();
     out.push('time=' + st.managed.name);
-    const r = JSON.parse(game.play_round());
+    game.start_round();
+    const lv = JSON.parse(game.step(45));
+    if (lv[0].minute !== 45) throw 'step falhou';
+    const r = JSON.parse(game.finish_round());
     out.push('jogos=' + r.length);
     const mk = JSON.parse(game.market('', 1e12));
     out.push('mercado=' + mk.length);
