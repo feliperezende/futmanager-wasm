@@ -78,6 +78,12 @@ Relatório da economia (8 temporadas simuladas):
 cargo test --release finance_report -- --ignored --nocapture
 ```
 
+Simulação de um técnico humano "razoável" (ajusta ingresso, renova contratos, compra/vende, investe) por 6 temporadas em cada divisão:
+
+```bash
+cargo test --release human_report -- --ignored --nocapture
+```
+
 ## Estrutura
 
 ```
