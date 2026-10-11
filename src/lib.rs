@@ -59,6 +59,9 @@ pub struct Player {
     /// Jogador das categorias de base (não conta no elenco profissional)
     #[serde(default)]
     pub academy: bool,
+    /// Clube dono do passe, quando o jogador está emprestado
+    #[serde(default)]
+    pub loan_from: Option<usize>,
 }
 
 fn default_morale() -> i32 { 50 }
@@ -114,7 +117,17 @@ pub struct Team {
     /// Obra de ampliação do estádio em andamento
     #[serde(default)]
     pub construction: Option<Construction>,
+    /// Saldo devedor de empréstimo bancário (já com juros)
+    #[serde(default)]
+    pub bank_debt: i64,
+    /// Parcela por rodada
+    #[serde(default)]
+    pub bank_payment: i64,
 }
+
+pub const BANK_INTEREST_PCT: i64 = 12;
+pub const BANK_INSTALLMENTS: i64 = 30;
+pub const LOAN_FEE_PCT: i64 = 10;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Construction { pub seats: i64, pub rounds_left: u32 }
@@ -144,7 +157,8 @@ pub struct MatchResult {
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Finance { pub tickets: i64, pub salaries: i64, pub transfers_in: i64, pub transfers_out: i64, pub prizes: i64,
-    #[serde(default)] pub upkeep: i64, #[serde(default)] pub investments: i64 }
+    #[serde(default)] pub upkeep: i64, #[serde(default)] pub investments: i64,
+    #[serde(default)] pub bank_in: i64, #[serde(default)] pub bank_paid: i64, #[serde(default)] pub loan_fees: i64 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Game {
@@ -211,7 +225,8 @@ impl Game {
                 let base = DIV_BASE_SKILL[div] + rng.range(-5, 5) as i32;
                 teams.push(Team { id, name, division: div, budget: DIV_BUDGET[div] + rng.range(0, 10) * DIV_BUDGET[div] / 20,
                     capacity: DIV_CAPACITY[div] * rng.range(70, 130) / 100, ticket_price: DIV_TICKET[div],
-                    formation: rng.pick(&FORMATIONS).to_string(), lineup: vec![], stats: Stats::default(), academy_level: 1, construction: None });
+                    formation: rng.pick(&FORMATIONS).to_string(), lineup: vec![], stats: Stats::default(), academy_level: 1, construction: None,
+                    bank_debt: 0, bank_payment: 0 });
                 for (pos, n) in [(Pos::G, 2), (Pos::D, 6), (Pos::M, 6), (Pos::A, 4)] {
                     for _ in 0..n { let p = Self::gen_player(&mut rng, players.len(), pos, base, Some(id)); players.push(p); }
                 }
@@ -229,7 +244,7 @@ impl Game {
     fn gen_player(rng: &mut Rng, id: usize, pos: Pos, base: i32, team: Option<usize>) -> Player {
         let skill = (base + rng.range(-10, 10) as i32).clamp(15, 95);
         Player { id, name: gen_player_name(rng), pos, skill, age: rng.range(17, 34) as i32, salary: salary_for(skill), team, goals: 0,
-            yellows: 0, suspended: 0, injured: 0, morale: 50, academy: false }
+            yellows: 0, suspended: 0, injured: 0, morale: 50, academy: false, loan_from: None }
     }
 
     fn refill_free_agents(&mut self) {
@@ -559,6 +574,89 @@ impl Game {
         Ok(format!("Obra iniciada: +{seats} lugares em {rounds} rodadas"))
     }
 
+    // ------------------------------------------------ Empréstimos
+    pub fn loan_fee(&self, id: usize) -> i64 { player_value(&self.players[id]) * LOAN_FEE_PCT / 100 }
+
+    /// Pega um jogador emprestado até o fim da temporada (paga taxa + salários).
+    pub fn loan_in(&mut self, borrower: usize, id: usize) -> Result<String, String> {
+        let p = self.players.get(id).ok_or("Jogador inexistente")?;
+        let owner = p.team.ok_or("Jogador sem clube: contrate-o diretamente")?;
+        if owner == borrower { return Err("Jogador já é seu".into()); }
+        if p.academy || p.loan_from.is_some() { return Err("Jogador indisponível para empréstimo".into()); }
+        if self.squad(owner).len() <= MIN_SQUAD { return Err("O clube dono não pode liberar mais jogadores".into()); }
+        if self.squad(borrower).len() >= MAX_SQUAD { return Err(format!("Elenco cheio (máx. {})", MAX_SQUAD)); }
+        let fee = self.loan_fee(id);
+        if self.teams[borrower].budget < fee { return Err("Orçamento insuficiente".into()); }
+        self.teams[borrower].budget -= fee;
+        self.teams[owner].budget += fee;
+        self.teams[owner].lineup.retain(|&x| x != id);
+        if Some(borrower) == self.managed { self.finance.loan_fees -= fee; }
+        if Some(owner) == self.managed { self.finance.loan_fees += fee; }
+        let p = &mut self.players[id];
+        p.loan_from = Some(owner);
+        p.team = Some(borrower);
+        Ok(format!("{} emprestado até o fim da temporada (taxa R$ {fee})", p.name))
+    }
+
+    /// Empresta um jogador próprio a outro clube até o fim da temporada.
+    pub fn loan_out(&mut self, owner: usize, id: usize) -> Result<String, String> {
+        if self.players.get(id).map(|p| p.team == Some(owner) && !p.academy && p.loan_from.is_none()) != Some(true) { return Err("Jogador não pode ser emprestado".into()); }
+        let fee = self.loan_fee(id);
+        let cands: Vec<usize> = (0..self.teams.len()).filter(|&t| t != owner && Some(t) != self.managed && self.teams[t].budget >= fee && self.squad(t).len() < MAX_SQUAD).collect();
+        if cands.is_empty() { return Err("Nenhum clube interessado".into()); }
+        let b = *self.rng.pick(&cands);
+        let r = self.loan_in(b, id)?;
+        Ok(format!("{} (para o {})", r, self.teams[b].name))
+    }
+
+    fn return_loans(&mut self, news: &mut Vec<String>) {
+        for p in self.players.iter_mut() {
+            if let Some(owner) = p.loan_from.take() {
+                if Some(owner) == self.managed || p.team == self.managed { news.push(format!("{} retorna de empréstimo", p.name)); }
+                p.team = Some(owner);
+            }
+        }
+    }
+
+    pub fn bank_limit(&self, team: usize) -> i64 { DIV_BUDGET[self.teams[team].division] * 2 }
+
+    /// Empréstimo bancário: juros fixos, pago em parcelas por rodada.
+    pub fn take_bank_loan(&mut self, team: usize, amount: i64) -> Result<String, String> {
+        if amount <= 0 { return Err("Valor inválido".into()); }
+        let owed = amount + amount * BANK_INTEREST_PCT / 100;
+        if self.teams[team].bank_debt + owed > self.bank_limit(team) { return Err(format!("Limite de crédito: R$ {}", self.bank_limit(team))); }
+        let t = &mut self.teams[team];
+        t.budget += amount;
+        t.bank_debt += owed;
+        t.bank_payment = (t.bank_debt + BANK_INSTALLMENTS - 1) / BANK_INSTALLMENTS;
+        if Some(team) == self.managed { self.finance.bank_in += amount; }
+        Ok(format!("Empréstimo de R$ {amount} aprovado. Dívida: R$ {}", self.teams[team].bank_debt))
+    }
+
+    pub fn repay_bank_loan(&mut self, team: usize, amount: i64) -> Result<String, String> {
+        let t = &mut self.teams[team];
+        let amount = amount.min(t.bank_debt);
+        if amount <= 0 { return Err("Não há dívida a pagar".into()); }
+        if t.budget < amount { return Err("Orçamento insuficiente".into()); }
+        t.budget -= amount;
+        t.bank_debt -= amount;
+        if t.bank_debt == 0 { t.bank_payment = 0; }
+        if Some(team) == self.managed { self.finance.bank_paid += amount; }
+        Ok(format!("Pagamento de R$ {amount} realizado", ))
+    }
+
+    fn pay_bank_installments(&mut self) {
+        for t in 0..self.teams.len() {
+            let tm = &mut self.teams[t];
+            let pay = tm.bank_payment.min(tm.bank_debt);
+            if pay > 0 {
+                tm.budget -= pay; tm.bank_debt -= pay;
+                if tm.bank_debt == 0 { tm.bank_payment = 0; }
+                if Some(t) == self.managed { self.finance.bank_paid += pay; }
+            }
+        }
+    }
+
     fn advance_construction(&mut self) {
         for t in 0..self.teams.len() {
             if let Some(c) = &mut self.teams[t].construction {
@@ -648,6 +746,7 @@ impl Game {
             if Some(t) == self.managed { self.finance.salaries += pay; self.finance.upkeep += upkeep; }
         }
         self.advance_construction();
+        self.pay_bank_installments();
         self.round += 1;
         if self.round >= ROUNDS { self.end_season(); }
         self.last_results = results.clone();
@@ -668,6 +767,7 @@ impl Game {
     pub fn end_season(&mut self) {
         let tables: Vec<Vec<usize>> = (0..DIVISIONS).map(|d| self.table(d)).collect();
         let mut news = vec![format!("Fim da temporada {}!", self.season)];
+        self.return_loans(&mut news);
         for d in 0..DIVISIONS {
             news.push(format!("Campeão da Divisão {}: {}", d + 1, self.teams[tables[d][0]].name));
             for (pos, &t) in tables[d].iter().enumerate() {
@@ -727,6 +827,7 @@ impl Game {
         let p = self.players.get(id).ok_or("Jogador inexistente")?;
         if p.team == Some(buyer) { return Err("Jogador já é seu".into()); }
         if p.academy { return Err("Jogadores da base de outros clubes não estão à venda".into()); }
+        if p.loan_from.is_some() { return Err("Jogador emprestado não pode ser negociado".into()); }
         if self.squad(buyer).len() >= MAX_SQUAD { return Err(format!("Elenco cheio (máx. {})", MAX_SQUAD)); }
         if let Some(seller) = p.team { if self.squad(seller).len() <= MIN_SQUAD { return Err("O clube vendedor não pode liberar mais jogadores".into()); } }
         let price = self.buy_price(id);
@@ -742,6 +843,7 @@ impl Game {
 
     pub fn sell(&mut self, seller: usize, id: usize) -> Result<String, String> {
         if self.players.get(id).map(|p| p.team == Some(seller) && !p.academy) != Some(true) { return Err("Jogador não é do seu elenco".into()); }
+        if self.players[id].loan_from.is_some() { return Err("Jogador emprestado não pode ser vendido".into()); }
         if self.squad(seller).len() <= MIN_SQUAD { return Err(format!("Elenco mínimo de {} jogadores", MIN_SQUAD)); }
         let price = self.sell_price(id);
         let cands: Vec<usize> = (0..self.teams.len()).filter(|&t| t != seller && self.teams[t].budget >= price && self.squad(t).len() < MAX_SQUAD).collect();
@@ -780,7 +882,8 @@ impl Game {
         serde_json::json!({"id": p.id, "name": p.name, "pos": p.pos.label(), "skill": p.skill, "age": p.age, "salary": p.salary,
             "value": player_value(p), "team": p.team, "teamName": p.team.map(|t| self.teams[t].name.clone()).unwrap_or("Sem clube".into()),
             "goals": p.goals, "buyPrice": self.buy_price(p.id), "sellPrice": self.sell_price(p.id),
-            "yellows": p.yellows, "suspended": p.suspended, "injured": p.injured, "morale": p.morale})
+            "yellows": p.yellows, "suspended": p.suspended, "injured": p.injured, "morale": p.morale,
+            "loanFee": self.loan_fee(p.id), "loanFrom": p.loan_from.map(|t| self.teams[t].name.clone())})
     }
 
     /// Estado das partidas ao vivo de uma divisão.
@@ -811,6 +914,8 @@ impl Game {
                 "wageBill": self.squad(m).iter().map(|&id| self.players[id].salary).sum::<i64>(), "finance": self.finance,
                 "construction": t.construction, "stadiumUpkeep": self.stadium_upkeep(m), "expectedAttendance": self.demand(m).min(t.capacity as f64) as i64,
                 "stadiumOptions": STADIUM_OPTIONS.iter().map(|&(s, r)| serde_json::json!({"seats": s, "rounds": r, "cost": Self::stadium_cost(s)})).collect::<Vec<_>>(),
+                "bankDebt": t.bank_debt, "bankPayment": t.bank_payment, "bankLimit": self.bank_limit(m),
+                "loanedOut": self.players.iter().filter(|p| p.loan_from == Some(m)).map(|p| self.player_json(p)).collect::<Vec<_>>(),
                 "academyLevel": t.academy_level, "academyUpgradeCost": self.academy_upgrade_cost(m), "academyUpkeep": self.academy_upkeep(m),
                 "academy": self.academy(m).iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>()})
         });
@@ -823,7 +928,7 @@ impl Game {
     }
 
     pub fn market_json(&self, pos: &str, max_price: i64) -> serde_json::Value {
-        let mut v: Vec<&Player> = self.players.iter().filter(|p| !p.academy && (p.team != self.managed || self.managed.is_none()))
+        let mut v: Vec<&Player> = self.players.iter().filter(|p| !p.academy && p.loan_from.is_none() && (p.team != self.managed || self.managed.is_none()))
             .filter(|p| pos.is_empty() || p.pos.label() == pos).filter(|p| self.buy_price(p.id) <= max_price).collect();
         v.sort_by_key(|p| -p.skill);
         serde_json::Value::Array(v.iter().take(150).map(|p| self.player_json(p)).collect())
@@ -896,6 +1001,10 @@ impl FutManager {
     pub fn sell(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.sell(m, id)), None => res(Err("Nenhum time".into())) } }
     pub fn promote_youth(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.promote_youth(m, id)), None => res(Err("Nenhum time".into())) } }
     pub fn release_youth(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.release_youth(m, id)), None => res(Err("Nenhum time".into())) } }
+    pub fn loan_in(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.loan_in(m, id)), None => res(Err("Nenhum time".into())) } }
+    pub fn loan_out(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.loan_out(m, id)), None => res(Err("Nenhum time".into())) } }
+    pub fn take_bank_loan(&mut self, amount: f64) -> String { match self.g.managed { Some(m) => res(self.g.take_bank_loan(m, amount as i64)), None => res(Err("Nenhum time".into())) } }
+    pub fn repay_bank_loan(&mut self, amount: f64) -> String { match self.g.managed { Some(m) => res(self.g.repay_bank_loan(m, amount as i64)), None => res(Err("Nenhum time".into())) } }
     pub fn upgrade_stadium(&mut self, option: usize) -> String { match self.g.managed { Some(m) => res(self.g.upgrade_stadium(m, option)), None => res(Err("Nenhum time".into())) } }
     pub fn upgrade_academy(&mut self) -> String { match self.g.managed { Some(m) => res(self.g.upgrade_academy(m)), None => res(Err("Nenhum time".into())) } }
 }
@@ -1195,7 +1304,53 @@ mod tests {
     }
 
     #[test]
+    fn player_loans() {
+        let mut g = Game::new(71);
+        g.managed = Some(4);
+        g.teams[4].budget = 50_000_000;
+        let target = g.squad(9)[0];
+        let fee = g.loan_fee(target);
+        let (b4, b9) = (g.teams[4].budget, g.teams[9].budget);
+        g.loan_in(4, target).unwrap();
+        assert_eq!(g.players[target].team, Some(4));
+        assert_eq!(g.players[target].loan_from, Some(9));
+        assert_eq!(g.teams[4].budget, b4 - fee);
+        assert_eq!(g.teams[9].budget, b9 + fee);
+        assert!(g.sell(4, target).is_err(), "emprestado não pode ser vendido");
+        assert!(g.buy(5, target).is_err());
+        let mine = g.squad(4)[0];
+        g.loan_out(4, mine).unwrap();
+        assert_eq!(g.players[mine].loan_from, Some(4));
+        assert_ne!(g.players[mine].team, Some(4));
+        for _ in 0..ROUNDS { g.play_round(); }
+        assert_eq!(g.players[target].team, Some(9), "volta ao dono no fim da temporada");
+        assert_eq!(g.players[mine].team, Some(4));
+        assert!(g.players.iter().all(|p| p.loan_from.is_none()));
+    }
+
+    #[test]
+    fn bank_loans() {
+        let mut g = Game::new(72);
+        g.managed = Some(30);
+        let b = g.teams[30].budget;
+        assert!(g.take_bank_loan(30, g.bank_limit(30) * 2).is_err());
+        g.take_bank_loan(30, 1_000_000).unwrap();
+        assert_eq!(g.teams[30].budget, b + 1_000_000);
+        assert_eq!(g.teams[30].bank_debt, 1_120_000);
+        let pay = g.teams[30].bank_payment;
+        assert!(pay > 0);
+        g.play_round();
+        assert_eq!(g.teams[30].bank_debt, 1_120_000 - pay);
+        g.teams[30].budget = 10_000_000;
+        g.repay_bank_loan(30, 100_000_000).unwrap();
+        assert_eq!(g.teams[30].bank_debt, 0);
+        assert_eq!(g.teams[30].bank_payment, 0);
+        assert!(g.repay_bank_loan(30, 1).is_err());
+    }
+
+    #[test]
     fn save_load_roundtrip() {
+
 
 
 
