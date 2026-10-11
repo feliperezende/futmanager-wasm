@@ -1,0 +1,42 @@
+# Workflow do GitHub Actions: testa, compila e (opcionalmente) publica no GitHub Pages.
+# Para ativar, copie este arquivo para .github/workflows/pages.yml
+# (o push de workflows exige um token com o escopo "workflow").
+name: Build e Pages
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Instalar wasm-pack
+        run: curl -sSfL https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+      - name: Testes, build e montagem do site
+        run: ./build.sh
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    # GitHub Pages em repositório privado exige plano pago; dispare manualmente.
+    if: github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

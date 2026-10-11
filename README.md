@@ -7,16 +7,24 @@ Jogo de gerenciamento de futebol para navegador, **original e clean-room**, insp
 
 ## Funcionalidades
 
-- 4 divisões com 16 clubes fictícios cada (64 clubes, 18 jogadores por elenco + mercado de jogadores livres)
-- Jogadores com posição (G/D/M/A), habilidade, idade, salário e valor de mercado
-- Escolha do clube a gerenciar (qualquer divisão)
-- Escalação manual (11 titulares, 1 goleiro) ou automática; formações 4-4-2, 4-3-3, 3-5-2, 5-3-2, 4-5-1
-- Rodadas com turno e returno (30 rodadas), placares ao vivo minuto a minuto e narração (gols, chances, cartões)
-- Classificação por pontos, vitórias, saldo e gols pró; artilharia
-- Fim de temporada: acesso (2 primeiros) e rebaixamento (2 últimos), premiação, evolução/envelhecimento e aposentadoria de jogadores (com reposição por jovens da base)
-- Finanças: caixa, bilheteria (público depende de força do time e campanha), preço do ingresso ajustável, folha salarial paga por rodada, prêmios
-- Mercado de transferências: compra (de clubes ou livres) e venda; IA também contrata
-- Salvar/carregar no `localStorage` do navegador
+- **4 divisões** com 16 clubes fictícios cada; elencos de 18 jogadores + mercado de livres
+- **Jogadores** com posição (G/D/M/A), habilidade, atributos (finalização, passe, marcação, goleiro, resistência), idade, salário, contrato, moral e condição física
+- **Escalação** manual ou automática; formações 4-4-2, 4-3-3, 3-5-2, 5-3-2, 4-5-1; jogadores fora de posição jogam improvisados (rendem menos)
+- **Táticas**: mentalidade defensiva/equilibrada/ofensiva e marcação pressão (rouba bolas, mas cansa mais) — alteráveis durante o jogo
+- **Partidas ao vivo** minuto a minuto (pausar / pular), narração de gols, chances, cartões, lesões e substituições
+- **Substituições**: até 3 por jogo, feitas ao vivo; lesionados são trocados automaticamente; a IA troca jogadores cansados
+- **Cartões e suspensões**: 2º amarelo = expulsão (1 jogo), vermelho direto (2 jogos), 3 amarelos acumulados = 1 jogo
+- **Lesões** de 1 a 5 rodadas; lesionados/suspensos não podem ser escalados
+- **Moral** (±10% de rendimento): sobe com vitórias e gols, cai com derrotas e banco
+- **Cansaço**: energia cai durante o jogo (conforme resistência e tática) e se recupera entre as rodadas
+- **Categorias de base**: jovens surgem a cada temporada; promover ou dispensar; 5 níveis de investimento
+- **Estádio**: ampliações (+2.000/+5.000/+10.000 lugares) com obras que duram rodadas; manutenção; público depende de força, campanha e preço do ingresso
+- **Empréstimos**: pegar/ceder jogadores até o fim da temporada (taxa de 10% do valor) e empréstimo bancário com juros e parcelas por rodada
+- **Contratos**: duração de 1 a 5 temporadas, pedidas salariais (habilidade, idade, moral, divisão), até 3 propostas recusadas por temporada, contratos que expiram no fim da temporada
+- **Finanças** calibradas por simulação de várias temporadas: bilheteria, cotas de TV, prêmios, salários, manutenção; clubes ricos da IA investem em reforços
+- **Dívidas**: juros de 1,5% por rodada no vermelho; IA endividada vende jogadores; o técnico sofre vendas forçadas após 6 rodadas e é **demitido** após 12 (ou dívida muito alta), recebendo propostas de outros clubes
+- **Fim de temporada**: acesso/rebaixamento (2 sobem, 2 caem), premiação, evolução/envelhecimento, aposentadorias
+- **5 slots de save** no `localStorage`, com resumo, sobrescrever/apagar e compactação gzip
 
 ## Requisitos
 
@@ -25,6 +33,15 @@ Jogo de gerenciamento de futebol para navegador, **original e clean-room**, insp
 - Python 3 (ou qualquer servidor HTTP estático)
 
 ## Compilar e rodar
+
+Forma rápida (testes + build + site pronto em `dist/`):
+
+```bash
+./build.sh
+python3 -m http.server -d dist 8080   # abra http://localhost:8080/
+```
+
+Manualmente:
 
 ```bash
 wasm-pack build --target web      # gera ./pkg
@@ -35,7 +52,11 @@ Abra <http://localhost:8080/www/> no navegador.
 
 > É preciso servir via HTTP (não abrir o arquivo direto com `file://`), pois o navegador bloqueia o carregamento de módulos WebAssembly locais.
 
-Autoteste no navegador: <http://localhost:8080/www/?selftest> (cria um jogo, joga uma temporada inteira, salva e carrega).
+Autoteste no navegador: <http://localhost:8080/www/?selftest> (cria um jogo, faz substituição, usa base, estádio, empréstimos, contratos e slots de save, e joga uma temporada inteira). Demonstração de partida ao vivo: `?demo`.
+
+## Publicação (GitHub Pages)
+
+O arquivo `ci/github-pages.yml` é um workflow do GitHub Actions que roda os testes, executa `./build.sh` e publica `dist/` no GitHub Pages. Para ativá-lo, copie-o para `.github/workflows/pages.yml` (o push de workflows exige um token com escopo `workflow`). Em repositórios privados, o GitHub Pages requer plano pago; por isso o deploy só roda via "Run workflow".
 
 ## Testes
 
@@ -43,12 +64,20 @@ Autoteste no navegador: <http://localhost:8080/www/?selftest> (cria um jogo, jog
 cargo test
 ```
 
-Os testes cobrem: geração do mundo, tabela de jogos (turno e returno sem repetições), determinismo por semente, temporada completa com acesso/rebaixamento, consistência da classificação, validação de escalação, transferências e finanças, e salvar/carregar.
+Os testes cobrem: geração do mundo, tabela de jogos, determinismo, temporada completa com acesso/rebaixamento, classificação, escalação, transferências, cartões/suspensões/lesões, substituições, moral, base, estádio, empréstimos, contratos, táticas/improvisação/cansaço, estabilidade da economia em 5 temporadas, consequências de dívidas e saves.
+
+Relatório da economia (8 temporadas simuladas):
+
+```bash
+cargo test --release finance_report -- --ignored --nocapture
+```
 
 ## Estrutura
 
 ```
 src/lib.rs      motor do jogo + API wasm + testes
+build.sh        testes + build wasm + site em dist/
+ci/             workflow do GitHub Pages (modelo)
 www/index.html  interface
 www/main.js     lógica da interface
 www/style.css   visual retrô
