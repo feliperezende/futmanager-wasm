@@ -267,6 +267,11 @@ function renderClub() {
   });
 }
 
+// Velocidade da partida (ms por minuto de jogo)
+const SPEEDS = { lento: { label: 'Lento', ms: 400 }, normal: { label: 'Normal', ms: 150 }, rapido: { label: 'Rápido', ms: 25 } };
+const getSpeed = () => { const s = localStorage.getItem('futmanager98_pref_speed'); return SPEEDS[s] ? s : 'normal'; };
+const setSpeed = (s) => localStorage.setItem('futmanager98_pref_speed', s);
+
 function renderRound() {
   const m = st.managed;
   const mine = st.next.filter((x) => x.division === m.division);
@@ -274,56 +279,100 @@ function renderRound() {
   $('#tab-jogos').innerHTML = `
     <div>${st.news.map((n) => `<div>📰 ${esc(n)}</div>`).join('')}</div>
     <p class="big">Próximo jogo: ${myGame ? `${esc(myGame.homeName)} x ${esc(myGame.awayName)}` : '—'}</p>
-    <button id="btnPlay">▶ Jogar rodada</button> <button id="btnPause" class="hidden">⏸ Pausar</button> <button id="btnSkip" class="hidden">⏩ Pular para o fim</button>
-    <div class="clock" id="clock">00'</div>
-    <div class="cols"><div><table id="scoreboard"><tr><th>Mandante</th><th></th><th>Visitante</th></tr>
-      ${mine.map((x) => `<tr class="${x === myGame ? 'me' : ''}"><td>${esc(x.homeName)}</td><td id="sc-${x.home}">- x -</td><td>${esc(x.awayName)}</td></tr>`).join('')}
-    </table><div id="subs"></div></div><div><div class="ticker" id="ticker">Aguardando o apito inicial...</div></div></div>`;
-  $('#btnPlay').onclick = () => { game.start_round(); runLive(); };
-  if (st.liveActive) runLive();
+    <button id="btnPlay">▶ Jogar rodada</button> <button id="btnHalf" class="hidden">▶ Iniciar 2º tempo</button>
+    <button id="btnPause" class="hidden">⏸ Pausar</button> <button id="btnSkip" class="hidden">⏩ Pular para o fim</button>
+    &nbsp; Velocidade: <select id="speed">${Object.entries(SPEEDS).map(([k, v]) => `<option value="${k}" ${k === getSpeed() ? 'selected' : ''}>${v.label}</option>`).join('')}</select>
+    <div><span class="clock" id="clock">00'</span> <span id="period" class="big"></span></div>
+    <div class="cols"><div><table id="scoreboard"><tr><th>Mandante</th><th></th><th>Visitante</th><th>Público</th><th>Renda</th></tr>
+      ${mine.map((x) => `<tr class="${x === myGame ? 'me' : ''}"><td>${esc(x.homeName)}</td><td id="sc-${x.home}">- x -</td><td>${esc(x.awayName)}</td><td id="pub-${x.home}">—</td><td id="renda-${x.home}">—</td></tr>`).join('')}
+    </table><div id="subs"></div><div id="roundSummary"></div></div><div><div class="ticker" id="ticker">Aguardando o apito inicial...</div></div></div>`;
+  $('#speed').onchange = (e) => { setSpeed(e.target.value); if (playing) startTimer(); };
+  $('#btnPlay').onclick = () => { game.start_round(); halftimeDone = false; runLive(); };
+  if (st.liveActive) { halftimeDone = JSON.parse(game.live())[0]?.minute > 45; runLive(); }
 }
 
-let liveTimer = null, paused = false;
+let liveTimer = null, paused = false, halftime = false, halftimeDone = false;
 function showLive(live) {
   const myId = st.managed.id;
   const myMatch = live.find((r) => r.home === myId || r.away === myId);
   const minute = live.length ? live[0].minute : 0;
   $('#clock').textContent = String(minute).padStart(2, '0') + "'";
-  for (const r of live) { const c = document.getElementById('sc-' + r.home); if (c) c.textContent = `${r.hg} x ${r.ag}`; }
+  $('#period').textContent = minute >= 90 ? 'Fim de jogo' : halftime ? 'INTERVALO' : minute > 45 ? '2º tempo' : minute > 0 ? '1º tempo' : '';
+  for (const r of live) {
+    const c = document.getElementById('sc-' + r.home); if (c) c.textContent = `${r.hg} x ${r.ag}`;
+    const p = document.getElementById('pub-' + r.home); if (p) p.textContent = r.attendance.toLocaleString('pt-BR') + (r.attendance >= r.capacity ? ' (lotado)' : '');
+    const g = document.getElementById('renda-' + r.home); if (g) g.textContent = money(r.receipts);
+  }
   const lines = [];
   for (const r of live) for (const e of r.events) if (r === myMatch || e.kind === 'gol') lines.push({ e, r });
   lines.sort((a, b) => b.e.minute - a.e.minute);
-  $('#ticker').innerHTML = lines.map(({ e, r }) => `<div class="${e.kind}">${String(e.minute).padStart(2, '0')}' ${r === myMatch ? '' : '[' + esc(r.homeName) + ' x ' + esc(r.awayName) + '] '}${esc(e.text)}</div>`).join('');
+  $('#ticker').innerHTML = (halftime ? '<div class="gol">⏸ INTERVALO — faça substituições ou mude a tática e clique em "Iniciar 2º tempo".</div>' : '') +
+    lines.map(({ e, r }) => `<div class="${e.kind}">${String(e.minute).padStart(2, '0')}' ${r === myMatch ? '' : '[' + esc(r.homeName) + ' x ' + esc(r.awayName) + '] '}${esc(e.text)}</div>`).join('');
   if (typeof renderSubs === 'function') renderSubs(myMatch);
   return minute;
 }
+function enterHalftime() {
+  halftime = true;
+  clearInterval(liveTimer);
+  $('#btnHalf').classList.remove('hidden'); $('#btnPause').classList.add('hidden');
+  showLive(JSON.parse(game.live()));
+}
+function startSecondHalf() {
+  halftime = false; halftimeDone = true;
+  $('#btnHalf').classList.add('hidden'); $('#btnPause').classList.remove('hidden');
+  startTimer();
+}
+function startTimer() {
+  clearInterval(liveTimer);
+  if (halftime) return;
+  liveTimer = setInterval(() => {
+    if (paused) return;
+    const minute = showLive(JSON.parse(game.step(1)));
+    if (minute >= 90) finishLive();
+    else if (minute === 45 && !halftimeDone) {
+      if (getSpeed() === 'rapido') halftimeDone = true; else enterHalftime();
+    }
+  }, SPEEDS[getSpeed()].ms);
+}
 function runLive() {
-  playing = true; paused = false;
+  playing = true; paused = false; halftime = false;
   $('#btnPlay').disabled = true; $('#btnSkip').classList.remove('hidden'); $('#btnPause').classList.remove('hidden');
   $('#btnPause').textContent = '⏸ Pausar';
   $('#btnPause').onclick = () => { paused = !paused; $('#btnPause').textContent = paused ? '▶ Continuar' : '⏸ Pausar'; };
-  $('#btnSkip').onclick = () => { showLive(JSON.parse(game.step(90))); finishLive(); };
-  showLive(JSON.parse(game.live()));
-  clearInterval(liveTimer);
-  liveTimer = setInterval(() => {
-    if (paused) return;
-    if (showLive(JSON.parse(game.step(1))) >= 90) finishLive();
-  }, 100);
+  $('#btnHalf').onclick = startSecondHalf;
+  $('#btnSkip').onclick = () => { halftime = false; showLive(JSON.parse(game.step(90))); finishLive(); };
+  const minute = showLive(JSON.parse(game.live()));
+  if (minute === 45 && !halftimeDone && getSpeed() !== 'rapido') enterHalftime(); else startTimer();
 }
 function finishLive() {
   clearInterval(liveTimer);
+  halftime = false;
   const results = JSON.parse(game.finish_round());
   playing = false;
   const myMatch = results.find((r) => st.managed && (r.home === st.managed.id || r.away === st.managed.id));
-  const att = myMatch ? `Público: ${myMatch.attendance.toLocaleString('pt-BR')}` : '';
+  const att = myMatch ? `Público: ${myMatch.attendance.toLocaleString('pt-BR')} — Renda: ${money(myMatch.receipts)}` : '';
   st = JSON.parse(game.state());
   $('#ticker').insertAdjacentHTML('afterbegin', `<div class="gol">FIM DE JOGO! ${att}</div>${st.news.map((n) => `<div>📰 ${esc(n)}</div>`).join('')}`);
-  $('#btnSkip').classList.add('hidden'); $('#btnPause').classList.add('hidden');
+  $('#btnSkip').classList.add('hidden'); $('#btnPause').classList.add('hidden'); $('#btnHalf').classList.add('hidden');
+  $('#period').textContent = 'Fim de jogo';
   if (document.getElementById('subs')) $('#subs').innerHTML = '';
+  if (st.managed) renderRoundSummary(st.managed.lastRound, myMatch);
   $('#btnPlay').disabled = false; $('#btnPlay').textContent = '▶ Próxima rodada';
   $('#btnPlay').onclick = () => { render(); };
   setStatus();
   autosave();
+}
+function renderRoundSummary(f, myMatch) {
+  const isHome = myMatch && myMatch.home === st.managed.id;
+  const income = f.tickets + f.tv + f.transfers_in + f.prizes + f.bank_in + Math.max(0, f.loan_fees);
+  const costs = f.salaries + f.upkeep + f.investments + f.transfers_out + f.bank_paid + Math.max(0, -f.loan_fees);
+  const row = (l, v, neg) => v ? `<tr><td>${l}</td><td style="text-align:right;${neg ? 'color:#a00' : ''}">${neg ? '-' : ''}${money(v)}</td></tr>` : '';
+  $('#roundSummary').innerHTML = `<fieldset><legend>Finanças da rodada — ${esc(st.managed.name)}</legend><table>
+    ${row(isHome ? `Bilheteria (${myMatch.attendance.toLocaleString('pt-BR')} pagantes)` : 'Bilheteria', f.tickets) || `<tr><td>Bilheteria</td><td style="text-align:right">${isHome ? money(0) : 'jogo fora de casa'}</td></tr>`}
+    ${row('Cotas de TV/patrocínio', f.tv)}${row('Prêmios', f.prizes)}${row('Vendas de jogadores', f.transfers_in)}${row('Empréstimo bancário recebido', f.bank_in)}
+    ${row('Salários', f.salaries, true)}${row('Manutenção/juros', f.upkeep, true)}${row('Investimentos', f.investments, true)}${row('Compras de jogadores', f.transfers_out, true)}${row('Parcelas do banco', f.bank_paid, true)}
+    <tr><td><b>Saldo da rodada</b></td><td style="text-align:right"><b style="color:${income - costs >= 0 ? '#060' : '#a00'}">${money(income - costs)}</b></td></tr>
+  </table></fieldset>`;
 }
 function setStatus() {
   const m = st.managed;
@@ -452,6 +501,31 @@ if (location.search.includes('selftest')) (async () => {
     $('#btnNew').click();
     document.querySelector('#teamList button').click();
     out.push('time=' + st.managed.name);
+    // UI da rodada: pausa no intervalo (Normal) e 2º tempo automático (Rápido)
+    const wait = async (cond, ms) => { const t0 = Date.now(); while (!cond()) { if (Date.now() - t0 > ms) return false; await new Promise((r) => setTimeout(r, 50)); } return true; };
+    setSpeed('normal');
+    tab = 'jogos'; render();
+    if ($('#speed').value !== 'normal') throw 'velocidade não persistida';
+    $('#btnPlay').click();
+    if (!(await wait(() => !$('#btnHalf').classList.contains('hidden'), 15000))) throw 'não parou no intervalo';
+    await new Promise((r) => setTimeout(r, 800));
+    if ($('#clock').textContent !== "45'") throw 'relógio andou no intervalo: ' + $('#clock').textContent;
+    const pubCells = [...document.querySelectorAll('[id^="pub-"]')].map((c) => c.textContent);
+    if (pubCells.some((t) => t === '—')) throw 'público não exibido';
+    if ([...document.querySelectorAll('[id^="renda-"]')].some((c) => !c.textContent.startsWith('R$'))) throw 'renda não exibida';
+    $('#btnHalf').click();
+    if (!(await wait(() => !playing, 15000))) throw 'partida não terminou';
+    if (!$('#roundSummary').textContent.includes('Saldo da rodada')) throw 'resumo da rodada';
+    out.push('intervalo=ok');
+    setSpeed('rapido');
+    $('#btnPlay').click(); // volta à tela da rodada
+    if ($('#speed').value !== 'rapido') throw 'velocidade';
+    const t0 = Date.now();
+    $('#btnPlay').click();
+    if (!(await wait(() => !playing, 8000))) throw 'rápido não terminou (parou no intervalo?)';
+    if (Date.now() - t0 > 5000) throw 'rápido lento demais';
+    out.push('rapido=ok');
+    setSpeed('normal');
     game.start_round();
     const lv = JSON.parse(game.step(45));
     if (lv[0].minute !== 45) throw 'step falhou';

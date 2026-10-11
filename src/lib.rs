@@ -138,6 +138,11 @@ pub struct LiveMatch {
     /// energia (0..100) de quem entrou em campo
     #[serde(default)]
     pub energy: std::collections::BTreeMap<usize, f64>,
+    /// público e renda definidos no início da rodada
+    #[serde(default)]
+    pub attendance: i64,
+    #[serde(default)]
+    pub receipts: i64,
 }
 
 pub const MAX_SUBS: u8 = 3;
@@ -218,6 +223,9 @@ pub struct MatchResult {
     pub ag: u32,
     pub attendance: i64,
     pub events: Vec<Event>,
+    /// renda (bilheteria) da partida para o mandante
+    #[serde(default)]
+    pub receipts: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -243,6 +251,9 @@ pub struct Game {
     /// O técnico foi demitido e precisa escolher um novo clube
     #[serde(default)]
     pub fired: bool,
+    /// Receitas/despesas do clube gerenciado na última rodada
+    #[serde(default)]
+    pub last_round: Finance,
 }
 
 pub const FORMATIONS: [&str; 5] = ["4-4-2", "4-3-3", "3-5-2", "5-3-2", "4-5-1"];
@@ -304,7 +315,7 @@ impl Game {
             }
         }
         let mut g = Game { rng, season: 1, round: 0, teams, players, schedule: vec![], managed: None,
-            finance: Finance::default(), news: vec![], last_results: vec![], live: vec![], fired: false };
+            finance: Finance::default(), news: vec![], last_results: vec![], live: vec![], fired: false, last_round: Finance::default() };
         g.refill_free_agents();
         for i in 0..g.players.len() { if g.players[i].team.is_some() { g.players[i].contract_until = 1 + g.rng.range(0, 3) as u32; } }
         for t in 0..g.teams.len() { for _ in 0..2 { g.gen_prospect(t); } }
@@ -919,7 +930,9 @@ impl Game {
         for div in 0..DIVISIONS {
             for (h, a) in self.schedule[div][self.round].clone() {
                 let on = [self.teams[h].lineup.clone(), self.teams[a].lineup.clone()];
-                self.live.push(LiveMatch { division: div, home: h, away: a, on, ..Default::default() });
+                let attendance = self.attendance(h);
+                let receipts = attendance * self.teams[h].ticket_price;
+                self.live.push(LiveMatch { division: div, home: h, away: a, on, attendance, receipts, ..Default::default() });
             }
         }
     }
@@ -938,6 +951,7 @@ impl Game {
         while self.step() {}
         let live = std::mem::take(&mut self.live);
         if live.is_empty() { return vec![]; }
+        let fin_before = self.finance.clone();
         // suspensões cumpridas e recuperação de lesões
         for p in self.players.iter_mut() {
             if p.team.is_some() && p.suspended > 0 { p.suspended -= 1; }
@@ -955,8 +969,7 @@ impl Game {
             for &(pl, n) in &m.injuries { self.players[pl].injured = self.players[pl].injured.max(n); }
             for (&id, &e) in &m.energy { self.players[id].condition = e.round() as i32; }
             self.update_morale(&m);
-            let attendance = self.attendance(m.home);
-            let r = MatchResult { division: m.division, home: m.home, away: m.away, hg: m.hg, ag: m.ag, attendance, events: m.events };
+            let r = MatchResult { division: m.division, home: m.home, away: m.away, hg: m.hg, ag: m.ag, attendance: m.attendance, events: m.events, receipts: m.receipts };
             self.apply_result(&r);
             results.push(r);
         }
@@ -973,6 +986,11 @@ impl Game {
         self.advance_construction();
         self.pay_bank_installments();
         self.debt_consequences();
+        let f = &self.finance;
+        let b = &fin_before;
+        self.last_round = Finance { tickets: f.tickets - b.tickets, salaries: f.salaries - b.salaries, transfers_in: f.transfers_in - b.transfers_in,
+            transfers_out: f.transfers_out - b.transfers_out, prizes: f.prizes - b.prizes, upkeep: f.upkeep - b.upkeep, investments: f.investments - b.investments,
+            bank_in: f.bank_in - b.bank_in, bank_paid: f.bank_paid - b.bank_paid, loan_fees: f.loan_fees - b.loan_fees, tv: f.tv - b.tv };
         self.round += 1;
         if self.round >= ROUNDS { self.end_season(); }
         self.last_results = results.clone();
@@ -980,7 +998,7 @@ impl Game {
     }
 
     fn apply_result(&mut self, r: &MatchResult) {
-        let income = r.attendance * self.teams[r.home].ticket_price;
+        let income = r.receipts;
         self.teams[r.home].budget += income;
         if Some(r.home) == self.managed { self.finance.tickets += income; }
         for (t, gf, ga) in [(r.home, r.hg, r.ag), (r.away, r.ag, r.hg)] {
@@ -1234,6 +1252,7 @@ impl Game {
                 self.bench(m, s).iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>() } else { vec![] }).collect(); serde_json::json!({
             "home": m.home, "away": m.away, "homeName": self.teams[m.home].name, "awayName": self.teams[m.away].name,
             "hg": m.hg, "ag": m.ag, "minute": m.minute, "events": m.events, "subs": m.subs, "bench": bench,
+            "attendance": m.attendance, "receipts": m.receipts, "capacity": self.teams[m.home].capacity,
             "energy": m.energy.iter().map(|(k, v)| (k.to_string(), serde_json::json!(v))).collect::<serde_json::Map<String, serde_json::Value>>(),
 
             "on": [m.on[0].iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>(),
@@ -1260,7 +1279,7 @@ impl Game {
                 "bankDebt": t.bank_debt, "bankPayment": t.bank_payment, "bankLimit": self.bank_limit(m),
                 "loanedOut": self.players.iter().filter(|p| p.loan_from == Some(m)).map(|p| self.player_json(p)).collect::<Vec<_>>(),
                 "tactic": t.tactic, "pressing": t.pressing, "mentalities": MENTALITIES,
-                "debtRounds": t.debt_rounds,
+                "debtRounds": t.debt_rounds, "lastRound": self.last_round,
                 "academyLevel": t.academy_level, "academyUpgradeCost": self.academy_upgrade_cost(m), "academyUpkeep": self.academy_upkeep(m),
                 "academy": self.academy(m).iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>()})
         });
@@ -1433,13 +1452,13 @@ impl FutManager {
     fn results_json(&self, r: &[MatchResult]) -> String {
         let names = |t: usize| self.g.teams[t].name.clone();
         serde_json::Value::Array(r.iter().map(|m| serde_json::json!({"division": m.division, "home": m.home, "away": m.away,
-            "homeName": names(m.home), "awayName": names(m.away), "hg": m.hg, "ag": m.ag, "attendance": m.attendance, "events": m.events})).collect()).to_string()
+            "homeName": names(m.home), "awayName": names(m.away), "hg": m.hg, "ag": m.ag, "attendance": m.attendance, "receipts": m.receipts, "events": m.events})).collect()).to_string()
     }
     pub fn play_round(&mut self) -> String {
         let r = self.g.play_round();
         let names = |t: usize| self.g.teams[t].name.clone();
         serde_json::Value::Array(r.iter().map(|m| serde_json::json!({"division": m.division, "home": m.home, "away": m.away,
-            "homeName": names(m.home), "awayName": names(m.away), "hg": m.hg, "ag": m.ag, "attendance": m.attendance, "events": m.events})).collect()).to_string()
+            "homeName": names(m.home), "awayName": names(m.away), "hg": m.hg, "ag": m.ag, "attendance": m.attendance, "receipts": m.receipts, "events": m.events})).collect()).to_string()
     }
     pub fn market(&self, pos: &str, max_price: f64) -> String { self.g.market_json(pos, max_price as i64).to_string() }
     pub fn buy(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.buy(m, id)), None => res(Err("Nenhum time".into())) } }
@@ -1606,6 +1625,12 @@ mod tests {
         let mut g = Game::new(22);
         g.start_round();
         let (y, r, i) = (g.live[0].on[0][1], g.live[0].on[0][2], g.live[0].on[0][3]);
+        while g.step() {}
+        // remove eventos sorteados na partida para esses jogadores e injeta os do teste
+        let ours = [y, r, i];
+        g.live[0].booked.retain(|x| !ours.contains(x));
+        g.live[0].reds.retain(|x| !ours.contains(&x.0));
+        g.live[0].injuries.retain(|x| !ours.contains(&x.0));
         g.players[y].yellows = 2;
         g.live[0].booked.push(y);
         g.live[0].reds.push((r, 2));
@@ -2031,7 +2056,34 @@ mod tests {
     }
 
     #[test]
+    fn attendance_and_receipts_per_match() {
+        let mut g = Game::new(131);
+        g.managed = Some(5);
+        g.start_round();
+        let live = g.live.clone();
+        for m in &live {
+            assert!(m.attendance > 0 && m.attendance <= g.teams[m.home].capacity);
+            assert_eq!(m.receipts, m.attendance * g.teams[m.home].ticket_price);
+        }
+        let js = g.live_json(g.teams[5].division);
+        assert!(js[0]["attendance"].as_i64().unwrap() > 0 && js[0]["receipts"].as_i64().unwrap() > 0);
+        let budget_home: Vec<i64> = live.iter().map(|m| g.teams[m.home].budget).collect();
+        let res = g.finish_round();
+        for (i, m) in live.iter().enumerate() {
+            let r = res.iter().find(|r| r.home == m.home).unwrap();
+            assert_eq!((r.attendance, r.receipts), (m.attendance, m.receipts), "resultado mantém público/renda");
+            let _ = budget_home[i];
+        }
+        let my = res.iter().find(|r| r.home == 5 || r.away == 5).unwrap();
+        let lr = &g.last_round;
+        assert_eq!(lr.tickets, if my.home == 5 { my.receipts } else { 0 });
+        assert_eq!(lr.tv, DIV_TV[g.teams[5].division]);
+        assert!(lr.salaries > 0);
+    }
+
+    #[test]
     fn save_summary() {
+
 
 
         let mut g = Game::new(101);
