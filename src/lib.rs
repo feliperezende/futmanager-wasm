@@ -53,7 +53,12 @@ pub struct Player {
     /// Rodadas de lesão restantes
     #[serde(default)]
     pub injured: u8,
+    /// Moral 0..100 (50 = normal). Afeta o rendimento em ±10%.
+    #[serde(default = "default_morale")]
+    pub morale: i32,
 }
+
+fn default_morale() -> i32 { 50 }
 
 impl Player {
     pub fn available(&self) -> bool { self.injured == 0 && self.suspended == 0 }
@@ -201,7 +206,7 @@ impl Game {
     fn gen_player(rng: &mut Rng, id: usize, pos: Pos, base: i32, team: Option<usize>) -> Player {
         let skill = (base + rng.range(-10, 10) as i32).clamp(15, 95);
         Player { id, name: gen_player_name(rng), pos, skill, age: rng.range(17, 34) as i32, salary: salary_for(skill), team, goals: 0,
-            yellows: 0, suspended: 0, injured: 0 }
+            yellows: 0, suspended: 0, injured: 0, morale: 50 }
     }
 
     fn refill_free_agents(&mut self) {
@@ -287,11 +292,43 @@ impl Game {
     pub fn strength(&self, team: usize) -> (f64, f64) { self.strength_of(&self.teams[team].lineup) }
 
     /// (ataque, defesa) de um conjunto de jogadores em campo.
+    /// Habilidade efetiva considerando a moral.
+    pub fn effective_skill(&self, id: usize) -> f64 {
+        let p = &self.players[id];
+        p.skill as f64 * (0.9 + 0.2 * p.morale.clamp(0, 100) as f64 / 100.0)
+    }
+
+    fn change_morale(&mut self, id: usize, d: i32) { let p = &mut self.players[id]; p.morale = (p.morale + d).clamp(0, 100); }
+
+    /// Atualiza a moral após uma partida.
+    fn update_morale(&mut self, m: &LiveMatch) {
+        let scorers: Vec<String> = m.events.iter().filter(|e| e.kind == "gol").map(|e| e.text.clone()).collect();
+        for side in 0..2 {
+            let team = if side == 0 { m.home } else { m.away };
+            let (gf, ga) = if side == 0 { (m.hg, m.ag) } else { (m.ag, m.hg) };
+            let res = if gf > ga { 5 } else if gf == ga { 0 } else { -5 };
+            for id in self.squad(team) {
+                let played = m.on[side].contains(&id) || m.out.contains(&id);
+                let mut d = res + if played { 1 } else { -2 };
+                let name = format!("GOOOL! {} (", self.players[id].name);
+                if played && scorers.iter().any(|t| t.starts_with(&name)) { d += 3; }
+                d += (50 - self.players[id].morale) / 10; // tende a voltar ao normal
+                self.change_morale(id, d);
+            }
+        }
+    }
+
+    pub fn team_morale(&self, team: usize) -> i32 {
+        let sq = self.squad(team);
+        if sq.is_empty() { return 50; }
+        sq.iter().map(|&id| self.players[id].morale).sum::<i32>() / sq.len() as i32
+    }
+
     pub fn strength_of(&self, ids: &[usize]) -> (f64, f64) {
         let (mut atk, mut def) = (0.0, 0.0);
         for &id in ids {
             let p = &self.players[id];
-            let s = p.skill as f64;
+            let s = self.effective_skill(id);
             match p.pos { Pos::G => def += 2.5 * s, Pos::D => { def += s; atk += 0.15 * s } Pos::M => { def += 0.5 * s; atk += 0.6 * s } Pos::A => atk += s }
         }
         (atk.max(1.0), def.max(1.0))
@@ -465,6 +502,7 @@ impl Game {
             }
             for &(pl, n) in &m.reds { self.players[pl].suspended += n; }
             for &(pl, n) in &m.injuries { self.players[pl].injured = self.players[pl].injured.max(n); }
+            self.update_morale(&m);
             let attendance = self.attendance(m.home);
             let r = MatchResult { division: m.division, home: m.home, away: m.away, hg: m.hg, ag: m.ag, attendance, events: m.events };
             self.apply_result(&r);
@@ -562,6 +600,7 @@ impl Game {
         if let Some(s) = seller { self.teams[s].budget += price; self.teams[s].lineup.retain(|&x| x != id); }
         if Some(buyer) == self.managed { self.finance.transfers_out += price; }
         self.players[id].team = Some(buyer);
+        self.players[id].morale = 65;
         Ok(format!("{} contratado por R$ {}", self.players[id].name, price))
     }
 
@@ -605,7 +644,7 @@ impl Game {
         serde_json::json!({"id": p.id, "name": p.name, "pos": p.pos.label(), "skill": p.skill, "age": p.age, "salary": p.salary,
             "value": player_value(p), "team": p.team, "teamName": p.team.map(|t| self.teams[t].name.clone()).unwrap_or("Sem clube".into()),
             "goals": p.goals, "buyPrice": self.buy_price(p.id), "sellPrice": self.sell_price(p.id),
-            "yellows": p.yellows, "suspended": p.suspended, "injured": p.injured})
+            "yellows": p.yellows, "suspended": p.suspended, "injured": p.injured, "morale": p.morale})
     }
 
     /// Estado das partidas ao vivo de uma divisão.
@@ -630,7 +669,7 @@ impl Game {
         } } }
         let managed = self.managed.map(|m| {
             let t = &self.teams[m];
-            serde_json::json!({"id": m, "name": t.name, "division": t.division, "budget": t.budget, "capacity": t.capacity,
+            serde_json::json!({"id": m, "name": t.name, "division": t.division, "budget": t.budget, "capacity": t.capacity, "morale": self.team_morale(m),
                 "ticketPrice": t.ticket_price, "formation": t.formation, "lineup": t.lineup,
                 "squad": self.squad(m).iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>(),
                 "wageBill": self.squad(m).iter().map(|&id| self.players[id].salary).sum::<i64>(), "finance": self.finance})
@@ -924,7 +963,34 @@ mod tests {
     }
 
     #[test]
+    fn morale_affects_strength_and_results() {
+        let mut g = Game::new(41);
+        let (a0, d0) = g.strength(5);
+        for id in g.squad(5) { g.players[id].morale = 100; }
+        let (a1, d1) = g.strength(5);
+        assert!(a1 > a0 * 1.05 && d1 > d0 * 1.05);
+        for id in g.squad(5) { g.players[id].morale = 0; }
+        let (a2, _) = g.strength(5);
+        assert!(a2 < a0 * 0.95);
+        // vitória sobe a moral, derrota derruba
+        let mut g = Game::new(42);
+        for id in g.squad(0).into_iter().chain(g.squad(1)) { g.players[id].morale = 50; }
+        g.start_round();
+        g.live.truncate(1);
+        g.live[0].home = 0; g.live[0].away = 1;
+        g.live[0].on = [g.teams[0].lineup.clone(), g.teams[1].lineup.clone()];
+        g.live[0].minute = 90; g.live[0].hg = 3; g.live[0].ag = 0;
+        g.live[0].events.clear();
+        let starter0 = g.teams[0].lineup[0];
+        let starter1 = g.teams[1].lineup[0];
+        g.finish_round();
+        assert!(g.players[starter0].morale > 50 && g.players[starter1].morale < 50);
+        assert!(g.team_morale(0) > g.team_morale(1));
+    }
+
+    #[test]
     fn save_load_roundtrip() {
+
 
 
         let mut g = Game::new(13);

@@ -46,6 +46,7 @@ function render() {
   ({ clube: renderClub, jogos: renderRound, tabela: renderTable, mercado: renderMarket, financas: renderFinance })[tab]();
 }
 
+function moraleIcon(v) { return (v >= 70 ? '😃' : v >= 45 ? '🙂' : v >= 25 ? '😐' : '😠') + ' ' + v; }
 function status(p) {
   return (p.injured ? `🚑${p.injured} ` : '') + (p.suspended ? `🟥${p.suspended} ` : '') + (p.yellows ? `🟨${p.yellows}` : '');
 }
@@ -62,10 +63,10 @@ function renderClub() {
     <fieldset><legend>Escalação</legend>
       Formação: <select id="formation">${st.formations.map((f) => `<option ${f === m.formation ? 'selected' : ''}>${f}</option>`).join('')}</select>
       <button id="btnAuto">Escalação automática</button> <button id="btnSaveLineup">Confirmar escalação</button>
-      <span id="lineupInfo"></span>
+      <span id="lineupInfo"></span> &nbsp; Moral do elenco: ${moraleIcon(m.morale)}
     </fieldset>
-    <div class="list"><table><tr><th>Tit.</th><th>Pos</th><th>Nome</th><th>Hab.</th><th>Idade</th><th>Salário/rod.</th><th>Valor</th><th>Gols</th><th></th></tr>
-    ${squad.map((p) => `<tr><td><input type="checkbox" data-id="${p.id}" ${selected.includes(p.id) ? 'checked' : ''}></td>${playerRow(p, `<td>${p.goals}</td><td><button data-sell="${p.id}">Vender (${money(p.sellPrice)})</button></td>`)}</tr>`).join('')}
+    <div class="list"><table><tr><th>Tit.</th><th>Pos</th><th>Nome</th><th>Hab.</th><th>Idade</th><th>Salário/rod.</th><th>Valor</th><th>Gols</th><th>Moral</th><th></th></tr>
+    ${squad.map((p) => `<tr><td><input type="checkbox" data-id="${p.id}" ${selected.includes(p.id) ? 'checked' : ''}></td>${playerRow(p, `<td>${p.goals}</td><td>${moraleIcon(p.morale)}</td><td><button data-sell="${p.id}">Vender (${money(p.sellPrice)})</button></td>`)}</tr>`).join('')}
     </table></div>`;
   const info = () => {
     const ps = m.squad.filter((p) => selected.includes(p.id));
