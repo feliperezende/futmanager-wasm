@@ -283,8 +283,8 @@ function renderTable() {
   const t = st.tables[tableDiv];
   $('#tab-tabela').innerHTML = `Divisão: <select id="tdiv">${[0, 1, 2, 3].map((d) => `<option value="${d}" ${d === tableDiv ? 'selected' : ''}>Divisão ${d + 1}</option>`).join('')}</select>
     <div class="cols"><div><table><tr><th>#</th><th>Clube</th><th>J</th><th>V</th><th>E</th><th>D</th><th>GP</th><th>GC</th><th>SG</th><th>Pts</th></tr>
-    ${t.map((r, i) => `<tr class="${r.id === st.managed.id ? 'me' : ''} ${i < 2 && tableDiv > 0 ? 'up' : ''} ${i >= t.length - 2 && tableDiv < 3 ? 'down' : ''}"><td>${i + 1}</td><td>${esc(r.name)}</td><td>${r.p}</td><td>${r.w}</td><td>${r.d}</td><td>${r.l}</td><td>${r.gf}</td><td>${r.ga}</td><td>${r.gf - r.ga}</td><td><b>${r.pts}</b></td></tr>`).join('')}
-    </table><small>Verde: zona de acesso • Vermelho: zona de rebaixamento</small></div>
+    ${t.map((r, i) => `<tr class="${r.id === st.managed.id ? 'me' : ''} ${i < 2 && tableDiv > 0 ? 'up' : ''} ${i >= t.length - 2 && tableDiv < 3 ? 'down' : ''}"><td>${i + 1}</td><td>${esc(r.name)}</td><td>${r.p}</td><td>${r.w}</td><td>${r.d}</td><td>${r.l}</td><td>${r.gf}</td><td>${r.ga}</td><td>${r.gf - r.ga}</td><td><b>${r.pts}</b>${r.ded ? ` <span style="color:#c00" title="Punição por dívidas">(-${r.ded})</span>` : ''}</td></tr>`).join('')}
+    </table><small>Verde: zona de acesso • Vermelho: zona de rebaixamento • (-N): pontos perdidos por dívidas (3 a cada 8 rodadas no vermelho; a cada 4 se a dívida for muito alta)</small></div>
     <div><table><tr><th colspan="3">Artilharia geral</th></tr>${st.scorers.map((p) => `<tr><td>${esc(p.name)}</td><td>${esc(p.teamName)}</td><td>${p.goals}</td></tr>`).join('')}</table></div></div>`;
   $('#tdiv').onchange = (e) => { tableDiv = +e.target.value; renderTable(); };
 }
@@ -323,7 +323,7 @@ function renderAcademy() {
 function renderFinance() {
   const m = st.managed, f = m.finance;
   const bal = f.tickets + f.transfers_in + f.prizes - f.salaries - f.transfers_out - f.upkeep - f.investments + f.tv + f.bank_in - f.bank_paid + f.loan_fees;
-  $('#tab-financas').innerHTML = `${m.debtRounds ? `<p style="color:#c00;font-weight:bold">⚠️ Caixa negativo há ${m.debtRounds} rodada(s): juros de 1,5% por rodada, vendas forçadas a partir de 6 rodadas e demissão após 12.</p>` : ''}<div class="cols"><div><table>
+  $('#tab-financas').innerHTML = `${m.debtRounds ? `<p style="color:#c00;font-weight:bold">⚠️ Caixa negativo há ${m.debtRounds} rodada(s): juros de 1,5% por rodada, vendas forçadas a partir de 6 rodadas e demissão após 12. Clubes endividados também perdem pontos na tabela.</p>` : ''}<div class="cols"><div><table>
     <tr><th colspan="2">Temporada ${st.season}</th></tr>
     <tr><td>Bilheteria</td><td>${money(f.tickets)}</td></tr>
     <tr><td>Cotas de TV/patrocínio</td><td>${money(f.tv)}</td></tr>

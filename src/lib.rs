@@ -143,7 +143,12 @@ pub struct LiveMatch {
 pub const MAX_SUBS: u8 = 3;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct Stats { pub p: i32, pub w: i32, pub d: i32, pub l: i32, pub gf: i32, pub ga: i32, pub pts: i32 }
+pub struct Stats { pub p: i32, pub w: i32, pub d: i32, pub l: i32, pub gf: i32, pub ga: i32, pub pts: i32,
+    /// pontos perdidos por punição financeira
+    #[serde(default)] pub deducted: i32 }
+
+/// Pontos descontados por punição financeira
+pub const DEBT_PENALTY_POINTS: i32 = 3;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Team {
@@ -347,6 +352,14 @@ impl Game {
             if Some(t) == self.managed { self.finance.upkeep += interest; }
             let dr = self.teams[t].debt_rounds;
             let is_user = Some(t) == self.managed;
+            // punição esportiva: -3 pontos a cada 8 rodadas no vermelho (a cada 4 se a dívida for muito alta)
+            let deep = self.teams[t].budget < -DIV_BUDGET[self.teams[t].division];
+            if dr % 8 == 0 || (deep && dr % 4 == 0) {
+                self.teams[t].stats.pts -= DEBT_PENALTY_POINTS;
+                self.teams[t].stats.deducted += DEBT_PENALTY_POINTS;
+                let msg = format!("Punição: {} perde {} pontos por dívidas", self.teams[t].name, DEBT_PENALTY_POINTS);
+                if is_user { self.news.push(format!("Diretoria: {msg}")); } else { self.news.push(msg); }
+            }
             // venda forçada do jogador mais valioso
             let force = if is_user { dr >= 6 && dr % 3 == 0 } else { dr >= 2 };
             if force && self.squad(t).len() > MIN_SQUAD + 1 {
@@ -1222,7 +1235,7 @@ impl Game {
     pub fn state_json(&self) -> serde_json::Value {
         let tables: Vec<_> = (0..DIVISIONS).map(|d| self.table(d).iter().map(|&t| {
             let s = &self.teams[t].stats;
-            serde_json::json!({"id": t, "name": self.teams[t].name, "p": s.p, "w": s.w, "d": s.d, "l": s.l, "gf": s.gf, "ga": s.ga, "pts": s.pts})
+            serde_json::json!({"id": t, "name": self.teams[t].name, "p": s.p, "w": s.w, "d": s.d, "l": s.l, "gf": s.gf, "ga": s.ga, "pts": s.pts, "ded": s.deducted})
         }).collect::<Vec<_>>()).collect();
         let mut next: Vec<serde_json::Value> = vec![];
         if self.round < ROUNDS { for d in 0..DIVISIONS { for &(h, a) in &self.schedule[d][self.round] {
@@ -1504,7 +1517,7 @@ mod tests {
         for _ in 0..10 { g.play_round(); }
         for t in &g.teams {
             let s = &t.stats;
-            assert_eq!(s.p, 10); assert_eq!(s.w + s.d + s.l, 10); assert_eq!(s.pts, s.w * 3 + s.d);
+            assert_eq!(s.p, 10); assert_eq!(s.w + s.d + s.l, 10); assert_eq!(s.pts, s.w * 3 + s.d - s.deducted);
         }
         let total_gf: i32 = g.teams.iter().map(|t| t.stats.gf).sum();
         let total_ga: i32 = g.teams.iter().map(|t| t.stats.ga).sum();
@@ -1964,7 +1977,27 @@ mod tests {
     }
 
     #[test]
+    fn debt_point_deductions() {
+        let mut g = Game::new(111);
+        let t = 41;
+        g.managed = Some(0);
+        for _ in 0..8 { g.teams[t].budget = -50_000_000; g.play_round(); }
+        let s = &g.teams[t].stats;
+        assert!(s.deducted >= DEBT_PENALTY_POINTS, "dívida profunda gera punição");
+        assert_eq!(s.pts, s.w * 3 + s.d - s.deducted);
+        let row = g.state_json()["tables"][g.teams[t].division].as_array().unwrap().iter().find(|r| r["id"] == t).unwrap().clone();
+        assert_eq!(row["ded"], s.deducted);
+        // o clube do usuário também é punido
+        let mut g = Game::new(112);
+        g.managed = Some(50);
+        for _ in 0..8 { if g.managed.is_none() { break; } g.teams[50].budget = -2_000_000; g.play_round(); }
+        assert!(g.teams[50].stats.deducted >= DEBT_PENALTY_POINTS);
+        assert!(g.news.iter().any(|n| n.contains("Punição")) || g.teams[50].stats.deducted > 0);
+    }
+
+    #[test]
     fn save_summary() {
+
         let mut g = Game::new(101);
         assert_eq!(g.summary_json()["team"], "Desempregado");
         g.managed = Some(7);
