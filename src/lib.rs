@@ -111,7 +111,18 @@ pub struct Team {
     /// Nível das categorias de base (1..=5)
     #[serde(default = "one")]
     pub academy_level: u8,
+    /// Obra de ampliação do estádio em andamento
+    #[serde(default)]
+    pub construction: Option<Construction>,
 }
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Construction { pub seats: i64, pub rounds_left: u32 }
+
+/// Opções de ampliação: (lugares, rodadas de obra)
+pub const STADIUM_OPTIONS: [(i64, u32); 3] = [(2000, 3), (5000, 5), (10000, 8)];
+pub const SEAT_COST: i64 = 400;
+pub const MAX_CAPACITY: i64 = 90000;
 
 fn one() -> u8 { 1 }
 pub const MAX_ACADEMY_LEVEL: u8 = 5;
@@ -200,7 +211,7 @@ impl Game {
                 let base = DIV_BASE_SKILL[div] + rng.range(-5, 5) as i32;
                 teams.push(Team { id, name, division: div, budget: DIV_BUDGET[div] + rng.range(0, 10) * DIV_BUDGET[div] / 20,
                     capacity: DIV_CAPACITY[div] * rng.range(70, 130) / 100, ticket_price: DIV_TICKET[div],
-                    formation: rng.pick(&FORMATIONS).to_string(), lineup: vec![], stats: Stats::default(), academy_level: 1 });
+                    formation: rng.pick(&FORMATIONS).to_string(), lineup: vec![], stats: Stats::default(), academy_level: 1, construction: None });
                 for (pos, n) in [(Pos::G, 2), (Pos::D, 6), (Pos::M, 6), (Pos::A, 4)] {
                     for _ in 0..n { let p = Self::gen_player(&mut rng, players.len(), pos, base, Some(id)); players.push(p); }
                 }
@@ -300,6 +311,7 @@ impl Game {
                     if (self.players[best].skill > worst || self.squad(t).len() < 18) && self.players[best].team == Some(t) { let _ = self.promote_youth(t, best); }
                 }
                 if self.teams[t].budget > 6 * self.academy_upgrade_cost(t) { let _ = self.upgrade_academy(t); }
+                if self.teams[t].budget > 4 * Self::stadium_cost(5000) && self.demand(t) > self.teams[t].capacity as f64 { let _ = self.upgrade_stadium(t, 1); }
             }
         }
     }
@@ -516,12 +528,49 @@ impl Game {
         r
     }
 
-    fn attendance(&mut self, home: usize) -> i64 {
+    /// Público esperado (antes da variação aleatória), limitado pela capacidade.
+    pub fn demand(&self, home: usize) -> f64 {
+        let t = &self.teams[home];
         let (a, d) = self.strength(home);
-        let s = &self.teams[home].stats;
-        let fill = (0.45 + ((a + d) / 1200.0 - 0.5) + 0.03 * s.pts as f64 / (s.p.max(1) as f64)).clamp(0.2, 1.0);
+        let s = &t.stats;
+        let interest = (0.5 + ((a + d) / 1200.0 - 0.5) + 0.05 * s.pts as f64 / (s.p.max(1) as f64)).clamp(0.2, 1.3);
+        let price_factor = (DIV_TICKET[t.division] as f64 / t.ticket_price.max(1) as f64).powf(1.3).min(2.0);
+        DIV_CAPACITY[t.division] as f64 * interest * price_factor
+    }
+
+    fn attendance(&mut self, home: usize) -> i64 {
         let cap = self.teams[home].capacity as f64;
-        (cap * fill * (0.9 + 0.2 * self.rng.f64())).min(cap) as i64
+        (self.demand(home) * (0.9 + 0.2 * self.rng.f64())).min(cap) as i64
+    }
+
+    pub fn stadium_cost(seats: i64) -> i64 { seats * SEAT_COST }
+    pub fn stadium_upkeep(&self, team: usize) -> i64 { self.teams[team].capacity / 4 }
+
+    /// Inicia uma ampliação do estádio (opção 0..3 de STADIUM_OPTIONS).
+    pub fn upgrade_stadium(&mut self, team: usize, option: usize) -> Result<String, String> {
+        let &(seats, rounds) = STADIUM_OPTIONS.get(option).ok_or("Opção inválida")?;
+        if self.teams[team].construction.is_some() { return Err("Já existe uma obra em andamento".into()); }
+        if self.teams[team].capacity + seats > MAX_CAPACITY { return Err(format!("Capacidade máxima é de {MAX_CAPACITY} lugares")); }
+        let cost = Self::stadium_cost(seats);
+        if self.teams[team].budget < cost { return Err("Orçamento insuficiente".into()); }
+        self.teams[team].budget -= cost;
+        self.teams[team].construction = Some(Construction { seats, rounds_left: rounds });
+        if Some(team) == self.managed { self.finance.investments += cost; }
+        Ok(format!("Obra iniciada: +{seats} lugares em {rounds} rodadas"))
+    }
+
+    fn advance_construction(&mut self) {
+        for t in 0..self.teams.len() {
+            if let Some(c) = &mut self.teams[t].construction {
+                c.rounds_left = c.rounds_left.saturating_sub(1);
+                if c.rounds_left == 0 {
+                    let seats = c.seats;
+                    self.teams[t].capacity += seats;
+                    self.teams[t].construction = None;
+                    if Some(t) == self.managed { self.news.push(format!("Ampliação concluída! O estádio agora tem {} lugares", self.teams[t].capacity)); }
+                }
+            }
+        }
     }
 
     fn pick_scorer(&mut self, on: &[usize]) -> usize {
@@ -594,10 +643,11 @@ impl Game {
         // salários
         for t in 0..self.teams.len() {
             let pay: i64 = self.squad(t).iter().map(|&id| self.players[id].salary).sum();
-            let upkeep = self.academy_upkeep(t);
+            let upkeep = self.academy_upkeep(t) + self.stadium_upkeep(t);
             self.teams[t].budget -= pay + upkeep;
             if Some(t) == self.managed { self.finance.salaries += pay; self.finance.upkeep += upkeep; }
         }
+        self.advance_construction();
         self.round += 1;
         if self.round >= ROUNDS { self.end_season(); }
         self.last_results = results.clone();
@@ -759,6 +809,8 @@ impl Game {
                 "ticketPrice": t.ticket_price, "formation": t.formation, "lineup": t.lineup,
                 "squad": self.squad(m).iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>(),
                 "wageBill": self.squad(m).iter().map(|&id| self.players[id].salary).sum::<i64>(), "finance": self.finance,
+                "construction": t.construction, "stadiumUpkeep": self.stadium_upkeep(m), "expectedAttendance": self.demand(m).min(t.capacity as f64) as i64,
+                "stadiumOptions": STADIUM_OPTIONS.iter().map(|&(s, r)| serde_json::json!({"seats": s, "rounds": r, "cost": Self::stadium_cost(s)})).collect::<Vec<_>>(),
                 "academyLevel": t.academy_level, "academyUpgradeCost": self.academy_upgrade_cost(m), "academyUpkeep": self.academy_upkeep(m),
                 "academy": self.academy(m).iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>()})
         });
@@ -844,6 +896,7 @@ impl FutManager {
     pub fn sell(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.sell(m, id)), None => res(Err("Nenhum time".into())) } }
     pub fn promote_youth(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.promote_youth(m, id)), None => res(Err("Nenhum time".into())) } }
     pub fn release_youth(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.release_youth(m, id)), None => res(Err("Nenhum time".into())) } }
+    pub fn upgrade_stadium(&mut self, option: usize) -> String { match self.g.managed { Some(m) => res(self.g.upgrade_stadium(m, option)), None => res(Err("Nenhum time".into())) } }
     pub fn upgrade_academy(&mut self) -> String { match self.g.managed { Some(m) => res(self.g.upgrade_academy(m)), None => res(Err("Nenhum time".into())) } }
 }
 
@@ -1113,7 +1166,37 @@ mod tests {
     }
 
     #[test]
+    fn stadium_upgrade_and_ticket_demand() {
+        let mut g = Game::new(61);
+        let t = 20;
+        g.managed = Some(t);
+        g.teams[t].budget = 10_000_000;
+        let cap = g.teams[t].capacity;
+        g.upgrade_stadium(t, 1).unwrap();
+        assert_eq!(g.teams[t].budget, 10_000_000 - 5000 * SEAT_COST);
+        assert!(g.upgrade_stadium(t, 0).is_err(), "uma obra por vez");
+        for _ in 0..4 { g.play_round(); }
+        assert_eq!(g.teams[t].capacity, cap);
+        g.play_round();
+        assert_eq!(g.teams[t].capacity, cap + 5000);
+        assert!(g.teams[t].construction.is_none());
+        g.teams[t].budget = 0;
+        assert!(g.upgrade_stadium(t, 0).is_err());
+        // preço alto reduz a demanda
+        let d0 = g.demand(t);
+        g.teams[t].ticket_price *= 3;
+        assert!(g.demand(t) < d0 * 0.5);
+        // estádio maior não reduz o público quando há demanda reprimida
+        g.teams[t].ticket_price = 1;
+        g.teams[t].capacity = 1000;
+        let small = g.attendance(t);
+        g.teams[t].capacity = 100_000;
+        assert!(g.attendance(t) > small);
+    }
+
+    #[test]
     fn save_load_roundtrip() {
+
 
 
 

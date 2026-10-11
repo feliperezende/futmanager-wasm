@@ -228,8 +228,15 @@ function renderFinance() {
     <tr><td><b>Caixa atual</b></td><td><b>${money(m.budget)}</b></td></tr>
   </table></div><div><fieldset><legend>Estádio</legend>
     Capacidade: ${m.capacity.toLocaleString('pt-BR')} lugares<br>Folha salarial por rodada: ${money(m.wageBill)}<br><br>
-    Preço do ingresso: <input id="tprice" type="number" min="1" max="500" value="${m.ticketPrice}"> <button id="tsave">Alterar</button>
+    Preço do ingresso: <input id="tprice" type="number" min="1" max="500" value="${m.ticketPrice}"> <button id="tsave">Alterar</button><br>
+    Público esperado no próximo jogo em casa: ~${m.expectedAttendance.toLocaleString('pt-BR')}<br>
+    Manutenção do estádio: ${money(m.stadiumUpkeep)} por rodada
+  </fieldset><fieldset><legend>Ampliação do estádio</legend>
+    ${m.construction ? `🏗️ Obra em andamento: +${m.construction.seats.toLocaleString('pt-BR')} lugares, faltam ${m.construction.rounds_left} rodada(s).`
+      : m.stadiumOptions.map((o, i) => `<button data-stad="${i}">+${o.seats.toLocaleString('pt-BR')} lugares — ${money(o.cost)} (${o.rounds} rodadas)</button>`).join('<br>')}
+    <br><small>Ampliar só aumenta o público se a procura for maior que a capacidade. Ingressos caros reduzem a procura.</small>
   </fieldset></div></div>`;
+  document.querySelectorAll('[data-stad]').forEach((b) => b.onclick = () => { if (confirm('Iniciar a obra?')) { flash(JSON.parse(game.upgrade_stadium(+b.dataset.stad))); refresh(); } });
   $('#tsave').onclick = () => { flash(JSON.parse(game.set_ticket_price(+$('#tprice').value))); refresh(); };
 }
 
@@ -259,6 +266,9 @@ if (location.search.includes('selftest')) {
     const ac = JSON.parse(game.state()).managed.academy;
     if (!JSON.parse(game.promote_youth(ac[0].id)).ok) throw 'promoção falhou';
     out.push('base=ok');
+    const fin = JSON.parse(game.state()).managed;
+    if (fin.expectedAttendance <= 0 || fin.stadiumOptions.length !== 3) throw 'estádio';
+    out.push('estadio=ok');
     localStorage.setItem(SAVE_KEY, game.save());
     game = FutManager.load(localStorage.getItem(SAVE_KEY));
     out.push('rodada_apos_load=' + JSON.parse(game.state()).round);
