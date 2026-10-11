@@ -50,7 +50,9 @@ function moraleIcon(v) { return (v >= 70 ? '😃' : v >= 45 ? '🙂' : v >= 25 ?
 function status(p) {
   return (p.injured ? `🚑${p.injured} ` : '') + (p.suspended ? `🟥${p.suspended} ` : '') + (p.yellows ? `🟨${p.yellows}` : '');
 }
-function playerRow(p, extra) {
+function attrs(p) { const a = p.attrs; return `${a.finishing}/${a.passing}/${a.tackling}/${a.keeping}/${a.stamina}`; }
+function playerRow(p, extra, mid) {
+  if (mid) return `<td class="pos-${p.pos}">${p.pos}</td><td>${esc(p.name)} <small>${status(p)}</small></td><td>${p.skill}</td>${extra}<td>${p.age}</td><td>${money(p.salary)}</td><td>${money(p.value)}</td>`;
   return `<td class="pos-${p.pos}">${p.pos}</td><td>${esc(p.name)} <small>${status(p)}</small></td><td>${p.skill}</td><td>${p.age}</td><td>${money(p.salary)}</td><td>${money(p.value)}</td>${extra}`;
 }
 
@@ -62,11 +64,13 @@ function renderClub() {
   $('#tab-clube').innerHTML = `
     <fieldset><legend>Escalação</legend>
       Formação: <select id="formation">${st.formations.map((f) => `<option ${f === m.formation ? 'selected' : ''}>${f}</option>`).join('')}</select>
+      Mentalidade: <select id="mentality">${m.mentalities.map((x) => `<option ${x === m.tactic ? 'selected' : ''}>${x}</option>`).join('')}</select>
+      <label><input type="checkbox" id="pressing" ${m.pressing ? 'checked' : ''}> Marcação pressão</label>
       <button id="btnAuto">Escalação automática</button> <button id="btnSaveLineup">Confirmar escalação</button>
       <span id="lineupInfo"></span> &nbsp; Moral do elenco: ${moraleIcon(m.morale)}
     </fieldset>
-    <div class="list"><table><tr><th>Tit.</th><th>Pos</th><th>Nome</th><th>Hab.</th><th>Idade</th><th>Salário/rod.</th><th>Valor</th><th>Gols</th><th>Moral</th><th>Contrato</th><th></th></tr>
-    ${squad.map((p) => `<tr><td><input type="checkbox" data-id="${p.id}" ${selected.includes(p.id) ? 'checked' : ''}></td>${playerRow(p, `<td>${p.goals}</td><td>${moraleIcon(p.morale)}</td><td style="${p.contractUntil <= st.season ? 'color:#c00;font-weight:bold' : ''}">${p.loanFrom ? '—' : 'até T' + p.contractUntil}</td><td>${p.loanFrom ? `<small>Emprestado pelo ${esc(p.loanFrom)}</small>` : `<button data-sell="${p.id}">Vender (${money(p.sellPrice)})</button> <button data-loanout="${p.id}">Emprestar</button> <button data-renew="${p.id}">Renovar</button>`}</td>`)}</tr>`).join('')}
+    <div class="list"><table><tr><th>Tit.</th><th>Pos</th><th>Nome</th><th>Hab.</th><th title="Finalização/Passe/Marcação/Goleiro/Resistência">Fin/Pas/Mar/Gol/Res</th><th>Físico</th><th>Idade</th><th>Salário/rod.</th><th>Valor</th><th>Gols</th><th>Moral</th><th>Contrato</th><th></th></tr>
+    ${squad.map((p) => `<tr><td><input type="checkbox" data-id="${p.id}" ${selected.includes(p.id) ? 'checked' : ''}></td>${playerRow(p, `<td><small>${attrs(p)}</small></td><td>${p.condition}%</td>`, true)}${(`<td>${p.goals}</td><td>${moraleIcon(p.morale)}</td><td style="${p.contractUntil <= st.season ? 'color:#c00;font-weight:bold' : ''}">${p.loanFrom ? '—' : 'até T' + p.contractUntil}</td><td>${p.loanFrom ? `<small>Emprestado pelo ${esc(p.loanFrom)}</small>` : `<button data-sell="${p.id}">Vender (${money(p.sellPrice)})</button> <button data-loanout="${p.id}">Emprestar</button> <button data-renew="${p.id}">Renovar</button>`}</td>`)}</tr>`).join('')}
     </table></div>`;
   const info = () => {
     const ps = m.squad.filter((p) => selected.includes(p.id));
@@ -79,6 +83,8 @@ function renderClub() {
     if (cb.checked) selected.push(id); else selected = selected.filter((x) => x !== id);
     info();
   });
+  const tac = () => { flash(JSON.parse(game.set_tactic($('#mentality').value, $('#pressing').checked))); };
+  $('#mentality').onchange = tac; $('#pressing').onchange = tac;
   $('#btnAuto').onclick = () => { flash(JSON.parse(game.auto_lineup($('#formation').value))); refresh(); };
   $('#btnSaveLineup').onclick = () => { const r = JSON.parse(game.set_lineup($('#formation').value, JSON.stringify(selected))); flash(r); if (r.ok) refresh(); };
   document.querySelectorAll('[data-renew]').forEach((b) => b.onclick = () => {
@@ -171,11 +177,15 @@ function renderSubs(mm) {
   const key = on.map((p) => p.id).join(',') + '|' + bench.map((p) => p.id).join(',') + '|' + mm.subs[side];
   if (key === subsKey) return;
   subsKey = key;
-  const opt = (p) => `<option value="${p.id}">${p.pos} ${esc(p.name)} (${p.skill})</option>`;
+  const opt = (p) => `<option value="${p.id}">${p.pos} ${esc(p.name)} (${p.skill}${mm.energy && mm.energy[p.id] !== undefined ? ', ' + Math.round(mm.energy[p.id]) + '% energia' : ''})</option>`;
   box.innerHTML = `<fieldset><legend>Substituições (${mm.subs[side]}/3)</legend>
     Sai: <select id="subOut">${on.map(opt).join('')}</select>
     Entra: <select id="subIn">${bench.map(opt).join('')}</select>
-    <button id="btnSub" ${mm.subs[side] >= 3 ? 'disabled' : ''}>Substituir</button></fieldset>`;
+    <button id="btnSub" ${mm.subs[side] >= 3 ? 'disabled' : ''}>Substituir</button><br>
+    Mentalidade: <select id="liveMent">${st.managed.mentalities.map((x) => `<option ${x === st.managed.tactic ? 'selected' : ''}>${x}</option>`).join('')}</select>
+    <label><input type="checkbox" id="livePress" ${st.managed.pressing ? 'checked' : ''}> Pressão</label></fieldset>`;
+  const lt = () => { flash(JSON.parse(game.set_tactic($('#liveMent').value, $('#livePress').checked))); st = JSON.parse(game.state()); };
+  $('#liveMent').onchange = lt; $('#livePress').onchange = lt;
   $('#btnSub').onclick = () => {
     const r = JSON.parse(game.substitute(+$('#subOut').value, +$('#subIn').value));
     flash(r); showLive(JSON.parse(game.live()));
@@ -281,6 +291,8 @@ if (location.search.includes('selftest')) {
     const sr = JSON.parse(game.substitute(mm.on[sd][1].id, mm.bench[sd][0].id));
     if (!sr.ok) throw 'substituição falhou: ' + sr.msg;
     out.push('sub=ok');
+    if (!JSON.parse(game.set_tactic('ofensiva', true)).ok) throw 'tática';
+    out.push('tatica=ok');
     const r = JSON.parse(game.finish_round());
     out.push('jogos=' + r.length);
     const mk = JSON.parse(game.market('', 1e12));

@@ -68,7 +68,37 @@ pub struct Player {
     /// Propostas de renovação recusadas nesta temporada
     #[serde(default)]
     pub refusals: u8,
+    /// Atributos técnicos (0..99)
+    #[serde(default)]
+    pub attrs: Attrs,
+    /// Condição física entre partidas (0..100)
+    #[serde(default = "full")]
+    pub condition: i32,
 }
+
+fn full() -> i32 { 100 }
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct Attrs { pub finishing: i32, pub passing: i32, pub tackling: i32, pub keeping: i32, pub stamina: i32 }
+
+impl Attrs {
+    /// Gera atributos coerentes com a posição e a habilidade geral.
+    pub fn generate(rng: &mut Rng, pos: Pos, skill: i32) -> Attrs {
+        let mut v = |main: bool| (skill + if main { rng.range(-4, 6) } else { rng.range(-28, -8) } as i32).clamp(5, 99);
+        let (f, p, t, k) = match pos {
+            Pos::G => (v(false), v(false), v(false), v(true)),
+            Pos::D => (v(false), v(false), v(true), v(false) / 2),
+            Pos::M => (v(false) + 6, v(true), v(false) + 6, v(false) / 2),
+            Pos::A => (v(true), v(false) + 6, v(false), v(false) / 2),
+        };
+        Attrs { finishing: f.min(99), passing: p.min(99), tackling: t.min(99), keeping: k.min(99), stamina: rng.range(45, 95) as i32 }
+    }
+    /// Ajusta os atributos quando a habilidade geral muda (envelhecimento/evolução).
+    pub fn shift(&mut self, d: i32) { for a in [&mut self.finishing, &mut self.passing, &mut self.tackling, &mut self.keeping] { *a = (*a + d).clamp(5, 99); } }
+}
+
+pub const MENTALITIES: [&str; 3] = ["defensiva", "equilibrada", "ofensiva"];
+fn default_tactic() -> String { "equilibrada".into() }
 
 pub const MAX_CONTRACT_YEARS: u32 = 5;
 pub const MAX_REFUSALS: u8 = 3;
@@ -102,6 +132,9 @@ pub struct LiveMatch {
     /// jogadores que deixaram o campo (não podem voltar)
     #[serde(default)]
     pub out: Vec<usize>,
+    /// energia (0..100) de quem entrou em campo
+    #[serde(default)]
+    pub energy: std::collections::BTreeMap<usize, f64>,
 }
 
 pub const MAX_SUBS: u8 = 3;
@@ -132,6 +165,12 @@ pub struct Team {
     /// Parcela por rodada
     #[serde(default)]
     pub bank_payment: i64,
+    /// Mentalidade: defensiva / equilibrada / ofensiva
+    #[serde(default = "default_tactic")]
+    pub tactic: String,
+    /// Marcação pressão (rouba mais bolas, cansa mais)
+    #[serde(default)]
+    pub pressing: bool,
 }
 
 pub const BANK_INTEREST_PCT: i64 = 12;
@@ -235,7 +274,7 @@ impl Game {
                 teams.push(Team { id, name, division: div, budget: DIV_BUDGET[div] + rng.range(0, 10) * DIV_BUDGET[div] / 20,
                     capacity: DIV_CAPACITY[div] * rng.range(70, 130) / 100, ticket_price: DIV_TICKET[div],
                     formation: rng.pick(&FORMATIONS).to_string(), lineup: vec![], stats: Stats::default(), academy_level: 1, construction: None,
-                    bank_debt: 0, bank_payment: 0 });
+                    bank_debt: 0, bank_payment: 0, tactic: default_tactic(), pressing: false });
                 for (pos, n) in [(Pos::G, 2), (Pos::D, 6), (Pos::M, 6), (Pos::A, 4)] {
                     for _ in 0..n { let p = Self::gen_player(&mut rng, players.len(), pos, base, Some(id)); players.push(p); }
                 }
@@ -254,7 +293,8 @@ impl Game {
     fn gen_player(rng: &mut Rng, id: usize, pos: Pos, base: i32, team: Option<usize>) -> Player {
         let skill = (base + rng.range(-10, 10) as i32).clamp(15, 95);
         Player { id, name: gen_player_name(rng), pos, skill, age: rng.range(17, 34) as i32, salary: salary_for(skill), team, goals: 0,
-            yellows: 0, suspended: 0, injured: 0, morale: 50, academy: false, loan_from: None, contract_until: 0, refusals: 0 }
+            yellows: 0, suspended: 0, injured: 0, morale: 50, academy: false, loan_from: None, contract_until: 0, refusals: 0,
+            attrs: Attrs::generate(rng, pos, skill), condition: 100 }
     }
 
     fn refill_free_agents(&mut self) {
@@ -409,7 +449,44 @@ impl Game {
     }
 
     /// (ataque, defesa) do time escalado.
-    pub fn strength(&self, team: usize) -> (f64, f64) { self.strength_of(&self.teams[team].lineup) }
+    pub fn strength(&self, team: usize) -> (f64, f64) { self.strength_of(team, &self.teams[team].lineup, None) }
+
+    /// Distribui os jogadores pelas funções da formação (G, D, M, A).
+    /// Quem não cabe na sua posição natural joga improvisado.
+    pub fn assign_roles(&self, team: usize, ids: &[usize]) -> Vec<(usize, Pos)> {
+        let (d, m, a) = formation_counts(&self.teams[team].formation).unwrap_or((4, 4, 2));
+        let mut slots = vec![(Pos::G, 1usize), (Pos::D, d), (Pos::M, m), (Pos::A, a)];
+        let mut out = Vec::new();
+        let mut rest = Vec::new();
+        for &id in ids {
+            let pos = self.players[id].pos;
+            let s = slots.iter_mut().find(|s| s.0 == pos).unwrap();
+            if s.1 > 0 { s.1 -= 1; out.push((id, pos)); } else { rest.push(id); }
+        }
+        // improvisados: preenche as vagas restantes, priorizando a linha vizinha
+        for id in rest {
+            let order: [Pos; 4] = match self.players[id].pos { Pos::G => [Pos::D, Pos::M, Pos::A, Pos::G], Pos::D => [Pos::M, Pos::A, Pos::G, Pos::D],
+                Pos::M => [Pos::A, Pos::D, Pos::G, Pos::M], Pos::A => [Pos::M, Pos::D, Pos::G, Pos::A] };
+            let role = order.iter().copied().find(|r| slots.iter().any(|s| s.0 == *r && s.1 > 0)).unwrap_or(self.players[id].pos);
+            if let Some(s) = slots.iter_mut().find(|s| s.0 == role) { s.1 = s.1.saturating_sub(1); }
+            out.push((id, role));
+        }
+        out
+    }
+
+    /// Contribuição de um jogador numa função, considerando atributos, moral e energia.
+    pub fn role_value(&self, id: usize, role: Pos, energy: f64) -> f64 {
+        let p = &self.players[id];
+        let a = &p.attrs;
+        let raw = match role {
+            Pos::G => a.keeping as f64,
+            Pos::D => 0.8 * a.tackling as f64 + 0.2 * a.passing as f64,
+            Pos::M => 0.6 * a.passing as f64 + 0.2 * a.tackling as f64 + 0.2 * a.finishing as f64,
+            Pos::A => 0.8 * a.finishing as f64 + 0.2 * a.passing as f64,
+        };
+        let improvised = if role == p.pos { 1.0 } else { 0.9 };
+        raw * improvised * (0.9 + 0.2 * p.morale.clamp(0, 100) as f64 / 100.0) * (0.75 + 0.25 * energy.clamp(0.0, 100.0) / 100.0)
+    }
 
     /// (ataque, defesa) de um conjunto de jogadores em campo.
     /// Habilidade efetiva considerando a moral.
@@ -444,14 +521,29 @@ impl Game {
         sq.iter().map(|&id| self.players[id].morale).sum::<i32>() / sq.len() as i32
     }
 
-    pub fn strength_of(&self, ids: &[usize]) -> (f64, f64) {
+    /// (ataque, defesa) de um conjunto de jogadores em campo, com tática e energia.
+    pub fn strength_of(&self, team: usize, ids: &[usize], energy: Option<&std::collections::BTreeMap<usize, f64>>) -> (f64, f64) {
         let (mut atk, mut def) = (0.0, 0.0);
-        for &id in ids {
-            let p = &self.players[id];
-            let s = self.effective_skill(id);
-            match p.pos { Pos::G => def += 2.5 * s, Pos::D => { def += s; atk += 0.15 * s } Pos::M => { def += 0.5 * s; atk += 0.6 * s } Pos::A => atk += s }
+        for (id, role) in self.assign_roles(team, ids) {
+            let e = energy.and_then(|m| m.get(&id).copied()).unwrap_or(self.players[id].condition as f64);
+            let s = self.role_value(id, role, e);
+            match role { Pos::G => def += 2.5 * s, Pos::D => { def += s; atk += 0.15 * s } Pos::M => { def += 0.5 * s; atk += 0.6 * s } Pos::A => atk += s }
         }
-        (atk.max(1.0), def.max(1.0))
+        let (ma, md) = match self.teams[team].tactic.as_str() { "defensiva" => (0.85, 1.15), "ofensiva" => (1.15, 0.88), _ => (1.0, 1.0) };
+        ((atk * ma).max(1.0), (def * md).max(1.0))
+    }
+
+    /// Multiplicador de cansaço por minuto de acordo com a tática.
+    fn fatigue_rate(&self, team: usize) -> f64 {
+        let t = &self.teams[team];
+        (match t.tactic.as_str() { "defensiva" => 0.9, "ofensiva" => 1.1, _ => 1.0 }) * if t.pressing { 1.35 } else { 1.0 }
+    }
+
+    pub fn set_tactic(&mut self, team: usize, mentality: &str, pressing: bool) -> Result<String, String> {
+        if !MENTALITIES.contains(&mentality) { return Err("Mentalidade inválida".into()); }
+        self.teams[team].tactic = mentality.into();
+        self.teams[team].pressing = pressing;
+        Ok(format!("Tática: {mentality}{}", if pressing { ", com pressão" } else { "" }))
     }
 
     /// Avança um minuto de uma partida ao vivo.
@@ -459,8 +551,22 @@ impl Game {
         if m.minute >= 90 { return; }
         m.minute += 1;
         let minute = m.minute;
-        let (ah, dh) = self.strength_of(&m.on[0]);
-        let (aa, da) = self.strength_of(&m.on[1]);
+        // cansaço
+        for side in 0..2 {
+            let team = if side == 0 { m.home } else { m.away };
+            let rate = self.fatigue_rate(team);
+            for &id in &m.on[side] {
+                let p = &self.players[id];
+                let e = m.energy.entry(id).or_insert(p.condition as f64);
+                let gk = if p.pos == Pos::G { 0.4 } else { 1.0 };
+                *e = (*e - 0.32 * (1.5 - p.attrs.stamina as f64 / 100.0) * rate * gk).max(0.0);
+            }
+        }
+        let (mut ah, dh) = self.strength_of(m.home, &m.on[0], Some(&m.energy));
+        let (mut aa, da) = self.strength_of(m.away, &m.on[1], Some(&m.energy));
+        // marcação pressão reduz o ataque adversário
+        if self.teams[m.away].pressing { ah *= 0.93; }
+        if self.teams[m.home].pressing { aa *= 0.93; }
         // normaliza: um time "médio" tem ataque ~ 0.55*defesa
         let ph = 0.0125 * ((ah / da) / 0.55).powf(1.6) * 1.12;
         let pa = 0.0125 * ((aa / dh) / 0.55).powf(1.6);
@@ -511,7 +617,11 @@ impl Game {
             for side in 0..2 {
                 let team = if side == 0 { m.home } else { m.away };
                 if Some(team) == self.managed || m.subs[side] >= MAX_SUBS - 1 || self.rng.f64() < 0.3 { continue; }
-                let Some(&worst) = m.on[side].iter().filter(|&&id| self.players[id].pos != Pos::G).min_by_key(|&&id| self.players[id].skill) else { continue };
+                // sai o mais cansado (ou o pior, se ninguém estiver cansado)
+                let energy = |id: usize| m.energy.get(&id).copied().unwrap_or(100.0);
+                let tired = m.on[side].iter().copied().filter(|&id| self.players[id].pos != Pos::G && energy(id) < 70.0)
+                    .min_by(|&a, &b| energy(a).partial_cmp(&energy(b)).unwrap());
+                let Some(worst) = tired.or_else(|| m.on[side].iter().copied().filter(|&id| self.players[id].pos != Pos::G).min_by_key(|&id| self.players[id].skill)) else { continue };
                 let pos = self.players[worst].pos;
                 if let Some(b) = self.bench(m, side).into_iter().filter(|&b| self.players[b].pos == pos).max_by_key(|&b| self.players[b].skill) {
                     let _ = self.substitute(m, side, worst, b);
@@ -683,7 +793,7 @@ impl Game {
 
     fn pick_scorer(&mut self, on: &[usize]) -> usize {
         let l = on.to_vec();
-        let w: Vec<f64> = l.iter().map(|&id| match self.players[id].pos { Pos::G => 0.02, Pos::D => 1.0, Pos::M => 3.0, Pos::A => 6.0 } * self.players[id].skill as f64).collect();
+        let w: Vec<f64> = l.iter().map(|&id| match self.players[id].pos { Pos::G => 0.02, Pos::D => 1.0, Pos::M => 3.0, Pos::A => 6.0 } * self.players[id].attrs.finishing.max(1) as f64).collect();
         let mut r = self.rng.f64() * w.iter().sum::<f64>();
         for (i, x) in w.iter().enumerate() { if r < *x { return l[i]; } r -= x; }
         *l.last().unwrap()
@@ -700,6 +810,7 @@ impl Game {
     pub fn start_round(&mut self) {
         if !self.live.is_empty() { return; }
         if self.round >= ROUNDS { self.end_season(); }
+        for p in self.players.iter_mut() { p.condition = (p.condition + 20).min(100); }
         self.news.clear();
         self.ai_transfers();
         for t in 0..self.teams.len() {
@@ -742,6 +853,7 @@ impl Game {
             }
             for &(pl, n) in &m.reds { self.players[pl].suspended += n; }
             for &(pl, n) in &m.injuries { self.players[pl].injured = self.players[pl].injured.max(n); }
+            for (&id, &e) in &m.energy { self.players[id].condition = e.round() as i32; }
             self.update_morale(&m);
             let attendance = self.attendance(m.home);
             let r = MatchResult { division: m.division, home: m.home, away: m.away, hg: m.hg, ag: m.ag, attendance, events: m.events };
@@ -801,7 +913,10 @@ impl Game {
             let delta = { let a = self.players[i].age; if a <= 23 { self.rng.range(0, 6) } else if a <= 29 { self.rng.range(-2, 3) } else { self.rng.range(-5, 0) } } as i32;
             let p = &mut self.players[i];
             p.age += 1; p.goals = 0;
+            let old = p.skill;
             p.skill = (p.skill + delta).clamp(10, 99);
+            p.attrs.shift(p.skill - old);
+            p.condition = 100;
             if p.team.is_none() { p.salary = salary_for(p.skill); }
             p.refusals = 0;
         }
@@ -969,6 +1084,8 @@ impl Game {
     pub fn normalize(&mut self) {
         let s = self.season;
         for p in self.players.iter_mut() { if p.team.is_some() && !p.academy && p.contract_until == 0 { p.contract_until = s + 1; } }
+        let mut rng = Rng(self.rng.0 ^ 0xA77);
+        for p in self.players.iter_mut() { if p.attrs == Attrs::default() { p.attrs = Attrs::generate(&mut rng, p.pos, p.skill); } }
     }
 
     // ------------------------------------------------ JSON para a interface
@@ -978,7 +1095,7 @@ impl Game {
             "goals": p.goals, "buyPrice": self.buy_price(p.id), "sellPrice": self.sell_price(p.id),
             "yellows": p.yellows, "suspended": p.suspended, "injured": p.injured, "morale": p.morale,
             "loanFee": self.loan_fee(p.id), "loanFrom": p.loan_from.map(|t| self.teams[t].name.clone()),
-            "contractUntil": p.contract_until, "refusals": p.refusals})
+            "contractUntil": p.contract_until, "refusals": p.refusals, "attrs": p.attrs, "condition": p.condition})
     }
 
     /// Estado das partidas ao vivo de uma divisão.
@@ -987,6 +1104,7 @@ impl Game {
                 self.bench(m, s).iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>() } else { vec![] }).collect(); serde_json::json!({
             "home": m.home, "away": m.away, "homeName": self.teams[m.home].name, "awayName": self.teams[m.away].name,
             "hg": m.hg, "ag": m.ag, "minute": m.minute, "events": m.events, "subs": m.subs, "bench": bench,
+            "energy": m.energy.iter().map(|(k, v)| (k.to_string(), serde_json::json!(v))).collect::<serde_json::Map<String, serde_json::Value>>(),
 
             "on": [m.on[0].iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>(),
                    m.on[1].iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>()]}) }).collect())
@@ -1011,6 +1129,7 @@ impl Game {
                 "stadiumOptions": STADIUM_OPTIONS.iter().map(|&(s, r)| serde_json::json!({"seats": s, "rounds": r, "cost": Self::stadium_cost(s)})).collect::<Vec<_>>(),
                 "bankDebt": t.bank_debt, "bankPayment": t.bank_payment, "bankLimit": self.bank_limit(m),
                 "loanedOut": self.players.iter().filter(|p| p.loan_from == Some(m)).map(|p| self.player_json(p)).collect::<Vec<_>>(),
+                "tactic": t.tactic, "pressing": t.pressing, "mentalities": MENTALITIES,
                 "academyLevel": t.academy_level, "academyUpgradeCost": self.academy_upgrade_cost(m), "academyUpkeep": self.academy_upkeep(m),
                 "academy": self.academy(m).iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>()})
         });
@@ -1102,6 +1221,7 @@ impl FutManager {
         self.g.wage_demand(id, years, self.g.managed).to_string()
     }
     pub fn renew(&mut self, id: usize, years: u32, wage: f64) -> String { match self.g.managed { Some(m) => res(self.g.renew(m, id, years, wage as i64)), None => res(Err("Nenhum time".into())) } }
+    pub fn set_tactic(&mut self, mentality: &str, pressing: bool) -> String { match self.g.managed { Some(m) => res(self.g.set_tactic(m, mentality, pressing)), None => res(Err("Nenhum time".into())) } }
     pub fn loan_in(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.loan_in(m, id)), None => res(Err("Nenhum time".into())) } }
     pub fn loan_out(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.loan_out(m, id)), None => res(Err("Nenhum time".into())) } }
     pub fn take_bank_loan(&mut self, amount: f64) -> String { match self.g.managed { Some(m) => res(self.g.take_bank_loan(m, amount as i64)), None => res(Err("Nenhum time".into())) } }
@@ -1486,7 +1606,65 @@ mod tests {
     }
 
     #[test]
+    fn tactics_change_balance() {
+        let mut g = Game::new(91);
+        let (a0, d0) = g.strength(3);
+        g.set_tactic(3, "ofensiva", false).unwrap();
+        let (a1, d1) = g.strength(3);
+        assert!(a1 > a0 && d1 < d0);
+        g.set_tactic(3, "defensiva", true).unwrap();
+        let (a2, d2) = g.strength(3);
+        assert!(a2 < a0 && d2 > d0);
+        assert!(g.set_tactic(3, "maluca", false).is_err());
+        assert!(g.fatigue_rate(3) > 1.0);
+    }
+
+    #[test]
+    fn out_of_position_players_are_weaker() {
+        let mut g = Game::new(92);
+        let sq = g.squad(0);
+        let pick = |pos: Pos, n: usize| sq.iter().copied().filter(|&i| g.players[i].pos == pos).take(n).collect::<Vec<_>>();
+        let mut proper = pick(Pos::G, 1); proper.extend(pick(Pos::D, 4)); proper.extend(pick(Pos::M, 4)); proper.extend(pick(Pos::A, 2));
+        let mut wrong = pick(Pos::G, 1); wrong.extend(pick(Pos::D, 6)); wrong.extend(pick(Pos::M, 4));
+        g.teams[0].formation = "4-4-2".into();
+        let roles = g.assign_roles(0, &wrong);
+        assert_eq!(roles.iter().filter(|r| r.1 == Pos::A).count(), 2, "zagueiros improvisados no ataque");
+        let (ap, _) = g.strength_of(0, &proper, None);
+        let (aw, _) = g.strength_of(0, &wrong, None);
+        assert!(aw < ap * 0.9, "ataque improvisado {aw} vs {ap}");
+        // atributos coerentes com a posição
+        for p in g.players.iter().filter(|p| p.pos == Pos::A) { assert!(p.attrs.finishing > p.attrs.keeping); }
+        for p in g.players.iter().filter(|p| p.pos == Pos::G) { assert!(p.attrs.keeping >= p.attrs.finishing); }
+    }
+
+    #[test]
+    fn fatigue_builds_and_recovers() {
+        let mut g = Game::new(93);
+        g.teams[0].pressing = true;
+        g.start_round();
+        while g.step() {}
+        let m = g.live.iter().find(|m| m.home == 0 || m.away == 0).unwrap().clone();
+        let side = if m.home == 0 { 0 } else { 1 };
+        let outfield: Vec<usize> = m.on[side].iter().copied().filter(|&i| g.players[i].pos != Pos::G).collect();
+        let avg = |ids: &[usize]| ids.iter().map(|i| m.energy[i]).sum::<f64>() / ids.len() as f64;
+        let mine = avg(&outfield);
+        assert!(mine < 85.0, "energia média {mine}");
+        let other: Vec<usize> = m.on[1 - side].iter().copied().filter(|&i| g.players[i].pos != Pos::G && !g.teams[if side == 0 { m.away } else { m.home }].pressing).collect();
+        if !other.is_empty() { assert!(mine < avg(&other) + 2.0); }
+        g.finish_round();
+        let p = outfield[0];
+        let c = g.players[p].condition;
+        assert!(c < 90);
+        g.start_round();
+        assert_eq!(g.players[p].condition, (c + 20).min(100));
+        // jogador cansado rende menos
+        let full = g.role_value(p, g.players[p].pos, 100.0);
+        assert!(g.role_value(p, g.players[p].pos, 30.0) < full * 0.85);
+    }
+
+    #[test]
     fn save_load_roundtrip() {
+
 
 
 
