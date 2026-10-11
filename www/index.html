@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>FutManager 98 — Gerenciador de Futebol</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="window" id="app">
+  <div class="titlebar"><span>⚽ FutManager 98</span><span id="status"></span></div>
+  <div id="start" class="panel">
+    <h1>FutManager 98</h1>
+    <p>Gerenciador de futebol com 4 divisões de clubes fictícios.</p>
+    <button id="btnNew">Novo jogo</button>
+    <button id="btnLoad">Carregar jogo salvo</button>
+    <div id="pickTeam" class="hidden">
+      <h2>Escolha seu clube</h2>
+      <select id="pickDiv"></select>
+      <div id="teamList" class="list"></div>
+    </div>
+  </div>
+  <div id="main" class="hidden">
+    <div class="menubar">
+      <button data-tab="clube">Clube</button>
+      <button data-tab="jogos">Rodada</button>
+      <button data-tab="tabela">Classificação</button>
+      <button data-tab="mercado">Mercado</button>
+      <button data-tab="financas">Finanças</button>
+      <span class="sep"></span>
+      <button id="btnSave">Salvar</button>
+      <button id="btnQuit">Menu</button>
+    </div>
+    <div id="msg" class="msg"></div>
+    <section id="tab-clube" class="tab"></section>
+    <section id="tab-jogos" class="tab"></section>
+    <section id="tab-tabela" class="tab"></section>
+    <section id="tab-mercado" class="tab"></section>
+    <section id="tab-financas" class="tab"></section>
+  </div>
+</div>
+<script type="module" src="main.js"></script>
+</body>
+</html>
