@@ -169,3 +169,22 @@ body{padding-bottom:40px}
   #taskbar .tb-clock{display:none}#taskbar .tb-items button{max-width:110px}
 }
 .ticker .penalti{color:#f0f;font-weight:bold}.ticker .penalti_perdido{color:#f88}
+
+/* ---- Botões de título Win98 (componente único) e janela principal móvel ---- */
+.tb-btns{display:flex;gap:0;align-items:center}
+.tbtn{width:16px;height:14px;min-width:0;padding:0;margin:0;display:inline-flex;align-items:center;justify-content:center;background:#c0c0c0;color:#000;border:0;border-radius:0;
+  box-shadow:inset -1px -1px #0a0a0a,inset 1px 1px #fff,inset -2px -2px #808080,inset 2px 2px #dfdfdf;cursor:default;line-height:0;font-size:0}
+.tbtn svg{fill:#000;display:block}
+.tbtn:active:not(:disabled){box-shadow:inset 1px 1px #0a0a0a,inset -1px -1px #fff,inset 2px 2px #808080,inset -2px -2px #dfdfdf}
+.tbtn:active:not(:disabled) svg{transform:translate(1px,1px)}
+.tbtn:disabled svg{fill:#808080;filter:drop-shadow(1px 1px 0 #fff)}
+.tbtn-min svg{align-self:flex-end;margin-bottom:2px}
+.tbtn-close{margin-left:2px}
+.tbtn:focus-visible{outline:1px dotted #000;outline-offset:-4px}
+.wm .tb-btns button.tbtn{padding:0;margin-left:0;line-height:0}.wm .tb-btns button.tbtn-close{margin-left:2px}
+.modal .titlebar button.tbtn{padding:0;line-height:0}
+.titlebar{padding:3px 3px 3px 6px}
+.wm-main{position:absolute;margin:0}
+.wm-maxed{left:0!important;top:0!important;width:auto!important;right:0;max-width:none;min-height:calc(100vh - 30px)}
+#taskbar .tb-start.on{border-style:inset;background:#e0e0e0}
+@media (max-width:600px){.wm-main{overflow:auto}.wm-main .tbtn-max{display:none}}

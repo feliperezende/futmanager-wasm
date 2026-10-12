@@ -1,5 +1,5 @@
 import init, { FutManager } from '../pkg/futmanager.js';
-import { initWM, openWindow, closeWindow, getWindow, closeWhere } from './wm.js';
+import { initWM, openWindow, closeWindow, getWindow, closeWhere, tbtn, manageMain } from './wm.js';
 import { openFinale, finaleOpen, renderLiveTable, renderHistory, isFinalStretch } from './finale.js';
 import { initSound, sfx, soundOn, setSound, getVolume, setVolume, played as soundLog, audioState } from './sound.js';
 initSound();
@@ -225,12 +225,15 @@ async function showSlots(mode) {
     await store.del(keyOf(n)); await store.del(metaOf(n)); showSlots(mode);
   });
 }
+$('#slotsBtns').innerHTML = tbtn('close', '', false).replace('class="tbtn', 'id="slotsClose" class="tbtn');
 $('#slotsClose').onclick = () => $('#slots').classList.add('hidden');
 
 function enterGame() { $('#start').classList.add('hidden'); $('#main').classList.remove('hidden'); tab = 'clube'; refresh(); }
 $('#btnSave').onclick = () => showSlots('save');
 $('#btnQuit').onclick = () => { if (confirm('Voltar ao menu? Progresso não salvo será perdido.')) { closeWhere(() => true); showStart(); } };
 initWM();
+$('#mainBtns').innerHTML = tbtn('min', 'wm-min') + tbtn('max', 'wm-max') + tbtn('close', 'wm-close', true);
+const mainWin = manageMain($('#app'), '⚽ FutManager 98');
 document.querySelectorAll('.menubar [data-tab]').forEach((b) => b.onclick = () => { if (b.dataset.tab === 'historico') { openHistory(); return; } if (!playing) { tab = b.dataset.tab; render(); } });
 initTeams({ game: () => game, getState: () => st, refresh: () => { refresh(); }, flash, canAct: () => !playing });
 
@@ -592,6 +595,30 @@ if (location.search.includes('selftest')) (async () => {
     $('#btnNew').click();
     document.querySelector('#teamList button').click();
     out.push('time=' + st.managed.name);
+    // janela principal: arrastar, minimizar/restaurar, maximizar/restaurar, posição salva
+    {
+      const app = $('#app'), bar = app.querySelector('.titlebar');
+      const x0 = app.offsetLeft, y0 = app.offsetTop;
+      const pe = (type, x, y) => bar.dispatchEvent(new PointerEvent(type, { bubbles: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true }));
+      pe('pointerdown', 300, 10); pe('pointermove', 340, 60); pe('pointerup', 340, 60);
+      if (app.offsetLeft !== x0 + 40 || app.offsetTop !== y0 + 50) throw `arrastar janela principal (${x0},${y0})->(${app.offsetLeft},${app.offsetTop})`;
+      const saved = JSON.parse(localStorage.getItem('futmanager98_main_win'));
+      if (saved.x !== app.offsetLeft || saved.y !== app.offsetTop) throw 'posição não salva';
+      if (!app.querySelector('.tbtn-min svg') || !app.querySelector('.tbtn-max svg') || !app.querySelector('.tbtn-close svg')) throw 'botões de título';
+      app.querySelector('.wm-min').click();
+      if (!app.classList.contains('wm-min-state')) throw 'minimizar janela principal';
+      document.querySelector('#taskbar .tb-start').click();
+      if (app.classList.contains('wm-min-state')) throw 'restaurar janela principal';
+      app.querySelector('.wm-max').click();
+      if (!app.classList.contains('wm-maxed') || !app.querySelector('.tbtn-restore')) throw 'maximizar';
+      app.querySelector('.tbtn-restore').click();
+      if (app.classList.contains('wm-maxed') || !app.querySelector('.tbtn-max')) throw 'restaurar tamanho';
+      pe('pointerdown', 340, 60); pe('pointermove', 340 - 40, 10); pe('pointerup', 300, 10);
+      if (app.offsetLeft !== x0 || app.offsetTop !== y0) throw 'voltar posição';
+      if ([...document.querySelectorAll('.titlebar button')].some((b) => !b.classList.contains('tbtn'))) throw 'botão de título fora do padrão';
+      out.push('janela_principal=ok');
+    }
+
     // UI da rodada: pausa no intervalo (Normal) e 2º tempo automático (Rápido)
     const wait = async (cond, ms) => { const t0 = Date.now(); while (!cond()) { if (Date.now() - t0 > ms) return false; await new Promise((r) => setTimeout(r, 50)); } return true; };
     setSpeed('normal');
