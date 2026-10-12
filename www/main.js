@@ -2,6 +2,7 @@ import init, { FutManager } from '../pkg/futmanager.js';
 import { initDesktop, openAbout } from './desktop.js';
 import { openCup, openDraw, animateShootout } from './cup.js';
 import { openJornal } from './jornal.js';
+import { createPitch } from './pitch.js';
 import { windowLabel, windowBanner, openOffers, openNegotiation, auctionHtml, openTransfers } from './market.js';
 import { initWM, openWindow, closeWindow, getWindow, closeWhere, tbtn, manageMain } from './wm.js';
 import { openFinale, finaleOpen, renderLiveTable, renderHistory, isFinalStretch } from './finale.js';
@@ -367,10 +368,12 @@ function renderRound() {
     &nbsp; <label title="Efeitos sonoros (apito, gols, cartões, pênaltis)"><input type="checkbox" id="sndOn" ${soundOn() ? 'checked' : ''}> 🔊 Som</label>
     <input type="range" id="sndVol" min="0" max="100" value="${Math.round(getVolume() * 100)}" title="Volume" ${soundOn() ? '' : 'disabled'} style="width:80px;vertical-align:middle">
     &nbsp; Velocidade: <select id="speed">${Object.entries(SPEEDS).map(([k, v]) => `<option value="${k}" ${k === getSpeed() ? 'selected' : ''}>${v.label}</option>`).join('')}</select>
+    &nbsp; <label title="Campinho animado da sua partida (oculto no modo Rápido)"><input type="checkbox" id="pitchOn" ${pitchPref() ? 'checked' : ''}> Mostrar campinho</label>
     <div><span class="clock" id="clock">00'</span> <span id="period" class="big"></span></div>
     <div class="cols"><div><table id="scoreboard"><tr><th>Mandante</th><th></th><th>Visitante</th><th>Público</th><th>Renda</th></tr>
       ${mine.map((x) => `<tr class="${x === myGame ? 'me' : ''}"><td>${teamLink(x.home, x.homeName)}</td><td id="sc-${x.home}">- x -</td><td>${teamLink(x.away, x.awayName)}</td><td id="pub-${x.home}">—</td><td id="renda-${x.home}">—</td></tr>`).join('')}
-    </table><div id="subs"></div></div><div>${isFinalStretch(st) ? '<div id="liveTable"></div>' : ''}<div class="ticker" id="ticker">Aguardando o apito inicial...</div></div></div>
+    </table><div id="subs"></div></div><div>${isFinalStretch(st) ? '<div id="liveTable"></div>' : ''}${myGame ? `<div class="pitchwin" id="pitchWin"><div class="pw-title"><span>⚽ Campinho — ${esc(myGame.homeName)} x ${esc(myGame.awayName)}</span><span class="pw-min" id="pitchMin"></span></div>
+      <div class="pw-body"><canvas id="pitchCv" width="320" height="200"></canvas></div><div class="pw-note small" id="pitchNote"></div></div>` : ''}<div class="ticker" id="ticker">Aguardando o apito inicial...</div></div></div>
     <div id="onfield"></div>`;
   renderLiveTable(st, []);
   const oppId = myGame ? (myGame.home === m.id ? myGame.away : myGame.home) : null;
@@ -379,7 +382,11 @@ function renderRound() {
   $('#btnPreview').onclick = openPreview;
   $('#btnPreview').disabled = !myGame || st.liveActive;
   if (myGame && !st.liveActive && previewRound !== st.season * 100 + st.round && window.innerWidth > 600) { previewRound = st.season * 100 + st.round; openPreview(); }
-  $('#speed').onchange = (e) => { setSpeed(e.target.value); if (playing) startTimer(); };
+  $('#speed').onchange = (e) => { setSpeed(e.target.value); updatePitch(); if (playing) startTimer(); };
+  pitch = myGame ? createPitch($('#pitchCv'), { sfx, getSpeed }) : null;
+  $('#pitchOn').onchange = (e) => { localStorage.setItem('futmanager98_pref_pitch', e.target.checked ? '1' : '0'); updatePitch(); };
+  if ($('#pitchMin')) $('#pitchMin').onclick = () => { pitchMin = !pitchMin; updatePitch(); };
+  updatePitch();
   $('#btnPlay').onclick = () => { game.start_round(); halftimeDone = false; seenEvents = 0; lastMinute = 0; shootReveal = Infinity; runLive(); };
   $('#sndOn').onchange = (e) => { setSound(e.target.checked); $('#sndVol').disabled = !e.target.checked; if (e.target.checked) sfx('virar'); };
   $('#sndVol').oninput = (e) => setVolume(+e.target.value / 100);
@@ -388,6 +395,20 @@ function renderRound() {
 }
 
 let previewRound = -1;
+// ------------------------------------------------ campinho animado
+let pitch = null, pitchMin = false, pitchForceOff = false, skipping = false;
+const pitchPref = () => localStorage.getItem('futmanager98_pref_pitch') !== '0';
+const pitchShown = () => !!pitch && pitchPref() && !pitchForceOff && !pitchMin && getSpeed() !== 'rapido';
+function updatePitch() {
+  const w = document.getElementById('pitchWin');
+  if (!w) return;
+  const fast = getSpeed() === 'rapido';
+  w.classList.toggle('hidden', !pitchPref() || pitchForceOff);
+  w.classList.toggle('min', pitchMin || fast);
+  $('#pitchMin').innerHTML = tbtn(pitchMin ? 'max' : 'min');
+  $('#pitchNote').textContent = fast ? 'Campinho oculto no modo Rápido.' : '';
+  if (pitch) pitch.setActive(pitchShown());
+}
 let liveTimer = null, paused = false, halftime = false, halftimeDone = false, seenEvents = 0, lastMinute = 0;
 let liveDone = false, shootReveal = Infinity, shootMatch = null;
 function showLive(live) {
@@ -416,13 +437,14 @@ function showLive(live) {
   $('#ticker').innerHTML = (halftime ? '<div class="gol">⏸ INTERVALO — faça substituições ou mude a tática e clique em "Iniciar 2º tempo".</div>' : '') +
     (myMatch ? lines.map((e) => `<div class="${e.kind}" data-m="${myMatch.home}">${String(e.minute).padStart(2, '0')}' ${esc(e.text)}</div>`).join('')
       : (live.length ? '<div>Seu clube não joga nesta rodada. Acompanhe os placares na lista ao lado.</div>' : ''));
+  if (pitch) pitch.update(myMatch, { halftime, halftimeDone, shootout: !!(myMatch && myMatch.pens), shootReveal, skip: skipping });
   if (typeof renderSubs === 'function') renderSubs(myMatch);
   renderLiveTable(st, live);
   const of = document.getElementById('onfield');
   if (of && myMatch && minute > 0) { closeWindow('pre-jogo'); if ($('#btnPreview')) $('#btnPreview').disabled = true; of.innerHTML = onFieldHtml(myMatch); }
   if (myMatch) {
     if (lastMinute === 0 && minute >= 1) sfx('kickoff', getSpeed());
-    for (const e of myMatch.events.slice(seenEvents)) if (['gol', 'cartao', 'vermelho', 'penalti', 'penalti_perdido', 'prorrogacao'].includes(e.kind)) sfx(e.kind, getSpeed());
+    for (const e of myMatch.events.slice(seenEvents)) if (['gol', 'cartao', 'vermelho', 'penalti', 'penalti_perdido', 'prorrogacao'].includes(e.kind) && !(e.kind === 'gol' && pitchShown() && !skipping)) sfx(e.kind, getSpeed()); // com o campinho, o som do gol sai quando a bola balança a rede
     seenEvents = myMatch.events.length;
   }
   lastMinute = minute;
@@ -445,7 +467,7 @@ function startTimer() {
   clearInterval(liveTimer);
   if (halftime) return;
   liveTimer = setInterval(() => {
-    if (paused) return;
+    if (paused || (pitch && pitch.busy())) return;
     const minute = showLive(JSON.parse(game.step(1)));
     if (liveDone) {
       if (shootMatch && shootReveal === 0) {
@@ -465,7 +487,7 @@ function runLive() {
   $('#btnPause').textContent = '⏸ Pausar';
   $('#btnPause').onclick = () => { paused = !paused; $('#btnPause').textContent = paused ? '▶ Continuar' : '⏸ Pausar'; };
   $('#btnHalf').onclick = startSecondHalf;
-  $('#btnSkip').onclick = () => { halftime = false; showLive(JSON.parse(game.step(200))); shootReveal = Infinity; finishLive(); };
+  $('#btnSkip').onclick = () => { halftime = false; skipping = true; showLive(JSON.parse(game.step(200))); shootReveal = Infinity; finishLive(); skipping = false; };
   const minute = showLive(JSON.parse(game.live()));
   if (minute === 45 && !halftimeDone && getSpeed() !== 'rapido') enterHalftime(); else startTimer();
 }
@@ -643,6 +665,7 @@ showStart();
 // Autoteste opcional: abra index.html?selftest para validar o motor no navegador.
 if (location.search.includes('selftest')) (async () => {
   const out = [];
+  pitchForceOff = true; // o campinho segura o relógio nos lances; é testado na seção própria
   try {
     $('#btnNew').click();
     document.querySelector('#teamList button').click();
@@ -904,6 +927,51 @@ if (location.search.includes('selftest')) (async () => {
       setSpeed('normal');
       out.push('copa=ok');
     {
+      // campinho animado
+      closeWhere(() => true);
+      while (JSON.parse(game.state()).dayType === 'cup') { game.start_round(); game.finish_round(); }
+      pitchForceOff = false; localStorage.setItem('futmanager98_pref_pitch', '1'); pitchMin = false;
+      setSpeed('normal'); tab = 'jogos'; refresh(); closeWhere(() => true);
+      if (!$('#pitchWin') || $('#pitchWin').classList.contains('hidden') || !$('#pitchOn').checked) throw 'campinho: painel ausente';
+      $('#btnPlay').click();
+      await new Promise((r) => setTimeout(r, 1200));
+      const px = $('#pitchCv').getContext('2d').getImageData(150, 100, 20, 20).data;
+      if (pitch.debug().frames < 5 || !px.some((v, i) => i % 4 === 1 && v > 100)) throw 'campinho: não desenhou';
+      const real = JSON.parse(game.live()).find((x) => x.home === st.managed.id || x.away === st.managed.id);
+      if (!real.colors || !real.strength) throw 'campinho: sem cores/força';
+      // reage a um gol: animação segura o relógio e o som sai quando a bola entra
+      const cv2 = document.createElement('canvas'); cv2.width = 320; cv2.height = 200;
+      const tp = createPitch(cv2, { sfx, getSpeed });
+      tp.setActive(true);
+      const fake = { ...real, minute: 10, events: [], hg: 0, ag: 0, over: false, pens: null };
+      tp.update(fake, {});
+      await new Promise((r) => setTimeout(r, 1100));
+      soundLog.length = 0;
+      tp.update({ ...fake, minute: 11, hg: 1, events: [{ minute: 11, side: 0, kind: 'gol', text: 'GOOOL! ' + real.on[0][9].name }] }, {});
+      if (!tp.busy()) throw 'campinho: gol não segurou o relógio';
+      if (!(await wait(() => tp.debug().goals === 1, 5000))) throw 'campinho: bola não entrou';
+      if (!soundLog.includes('gol')) throw 'campinho: som do gol';
+      if (!(await wait(() => !tp.busy(), 5000))) throw 'campinho: animação não terminou';
+      // disputa por pênaltis cobrança a cobrança
+      const kicks = [{ kind: 'disputa_inicio', side: 0, text: 'x' }, { kind: 'disputa_gol', side: 0, text: real.on[0][10].name + ' converte' }, { kind: 'disputa_perdido', side: 1, text: real.on[1][10].name + ' chuta para fora' },
+        { kind: 'disputa_gol', side: 0, text: 'y converte' }, { kind: 'disputa_fim', side: 0, text: 'fim' }];
+      const sm = { ...fake, minute: 120, over: true, pens: [2, 0], events: kicks.map((k) => ({ minute: 120, ...k })) };
+      for (let n = 1; n <= kicks.length; n++) { tp.update(sm, { shootout: true, shootReveal: n }); await new Promise((r) => setTimeout(r, 120)); }
+      if (!(await wait(() => tp.debug().kicks === 3 && !tp.busy(), 6000)) || tp.debug().pens.join() !== '2,0') throw 'campinho: disputa ' + JSON.stringify(tp.debug());
+      tp.setActive(false);
+      // Rápido: campinho oculto e sem segurar o relógio
+      $('#speed').value = 'rapido'; $('#speed').onchange({ target: { value: 'rapido' } });
+      if (!$('#pitchWin').classList.contains('min') || pitch.debug().active || pitch.busy()) throw 'campinho: visível no Rápido';
+      if (halftime) startSecondHalf();
+      if (!(await wait(() => !playing, 15000))) throw 'campinho: rodada no Rápido não terminou';
+      // preferência persistida
+      $('#pitchOn').checked = false; $('#pitchOn').onchange({ target: $('#pitchOn') });
+      if (localStorage.getItem('futmanager98_pref_pitch') !== '0') throw 'campinho: preferência';
+      localStorage.setItem('futmanager98_pref_pitch', '1');
+      setSpeed('normal'); pitchForceOff = true;
+      out.push('campinho=ok');
+    }
+    {
       closeWindow('jornal');
       game.play_round(); refresh();
       if (!getWindow('jornal')) throw 'jornal: não abriu após a rodada';
@@ -1020,3 +1088,13 @@ if (location.search.includes('jornal')) {
   closeWhere(() => true);
   tab = 'clube'; refresh();
 }
+// Demonstração do campinho: index.html?campinho começa uma rodada ao vivo com o campinho visível.
+if (location.search.includes('campinho')) {
+  $('#btnNew').click();
+  document.querySelector('#teamList button').click();
+  localStorage.setItem('futmanager98_pref_pitch', '1'); setSpeed('normal');
+  closeWhere(() => true);
+  tab = 'jogos'; refresh(); closeWhere(() => true);
+  if (!location.search.includes('wait')) $('#btnPlay').click();
+}
+window.__pitch = () => pitch;

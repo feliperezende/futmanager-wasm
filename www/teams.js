@@ -46,6 +46,7 @@ const COLS = [
 let sortKey = 'pos', sortDir = 1;
 export function teamInfoHtml(t) {
   return `<table class="kv">
+    ${t.colors ? `<tr><td>Cores</td><td><span class="clubcolor" style="background:${t.colors[0]}"></span><span class="clubcolor" style="background:${t.colors[1]}"></span> ${esc(t.colors[2])}</td></tr>` : ''}
     <tr><td>Divisão</td><td>${t.division + 1}ª — <b>${t.position}º lugar</b> (${t.stats.pts} pts, ${t.stats.w}V ${t.stats.d}E ${t.stats.l}D, ${t.stats.gf}:${t.stats.ga})</td></tr>
     <tr><td>Forma (últimos 5)</td><td>${formHtml(t.form)}</td></tr>
     <tr><td>Esquema / tática</td><td>${esc(t.formation)} · ${esc(t.tactic)}${t.pressing ? ' · pressão' : ''}</td></tr>

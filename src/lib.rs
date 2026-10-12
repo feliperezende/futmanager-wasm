@@ -377,6 +377,20 @@ fn gen_word(rng: &mut Rng, n: usize) -> String { (0..n).map(|_| *rng.pick(&SYL))
 fn gen_city(rng: &mut Rng) -> String { let n = rng.range(2, 3) as usize; cap(&gen_word(rng, n)) + *rng.pick(&CITY_END) }
 fn gen_player_name(rng: &mut Rng) -> String { format!("{} {}", rng.pick(&FIRST), cap(&(gen_word(rng, 2) + *rng.pick(&["s", "ni", "lho", "ra", "to", ""])))) }
 
+/// Cores do clube (originais, determinísticas pelo id): (nome, hex)
+pub const CLUB_COLORS: [(&str, &str); 12] = [("azul", "#1840c8"), ("vermelho", "#d01818"), ("verde", "#0a8a2a"), ("amarelo", "#f0d000"), ("branco", "#f4f4f4"),
+    ("preto", "#181818"), ("grená", "#801830"), ("laranja", "#f07800"), ("celeste", "#60b0f0"), ("roxo", "#6030a0"), ("vinho", "#5a1020"), ("cinza", "#909090")];
+pub fn club_colors(id: usize) -> [(&'static str, &'static str); 2] {
+    let h = (id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 20;
+    let a = (h % 12) as usize;
+    let mut b = ((h / 12) % 12) as usize;
+    // segunda cor diferente e com contraste (evita verde x grama como dupla escura)
+    let dark = |i: usize| matches!(i, 0 | 2 | 5 | 6 | 9 | 10);
+    if b == a || dark(a) == dark(b) { b = if dark(a) { [4, 3, 8, 11][(h as usize / 7) % 4] } else { [5, 0, 6, 9][(h as usize / 7) % 4] }; }
+    if b == a { b = 4; }
+    [CLUB_COLORS[a], CLUB_COLORS[b]]
+}
+fn colors_json(id: usize) -> serde_json::Value { let c = club_colors(id); serde_json::json!([c[0].1, c[1].1, format!("{} e {}", c[0].0, c[1].0)]) }
 pub fn fmt_int(v: i64) -> String { fmt_money(v).replace("R$ ", "") }
 pub fn fmt_money(v: i64) -> String {
     let s = v.abs().to_string();
@@ -2066,6 +2080,8 @@ impl Game {
             "tactics": [&self.teams[m.home].tactic, &self.teams[m.away].tactic], "formations": [&self.teams[m.home].formation, &self.teams[m.away].formation],
             "energy": m.energy.iter().filter(|_| detail).map(|(k, v)| (k.to_string(), serde_json::json!(v))).collect::<serde_json::Map<String, serde_json::Value>>(),
 
+            "colors": [colors_json(m.home), colors_json(m.away)],
+            "strength": if detail { serde_json::json!([0usize, 1].iter().map(|&s| { let (a, d) = self.strength_of(if s == 0 { m.home } else { m.away }, &m.on[s], Some(&m.energy)); [a, d] }).collect::<Vec<_>>()) } else { serde_json::Value::Null },
             "on": [on(0), on(1)]}) }).collect())
     }
 
@@ -2087,7 +2103,7 @@ impl Game {
         let mut scorers: Vec<usize> = squad.iter().copied().filter(|&id| self.players[id].goals > 0).collect();
         scorers.sort_by_key(|&id| -self.players[id].goals);
         let s = &team.stats;
-        serde_json::json!({"id": t, "name": team.name, "division": d, "position": pos, "budget": team.budget, "capacity": team.capacity,
+        serde_json::json!({"id": t, "name": team.name, "colors": colors_json(t), "division": d, "position": pos, "budget": team.budget, "capacity": team.capacity,
             "ticketPrice": team.ticket_price, "academyLevel": team.academy_level, "form": team.form, "formation": team.formation, "tactic": team.tactic,
             "pressing": team.pressing, "attack": (atk * 10.0).round() / 10.0, "defense": (def * 10.0).round() / 10.0, "morale": self.team_morale(t),
             "managed": Some(t) == self.managed, "expected": self.expected.get(t).copied(),
@@ -3339,6 +3355,30 @@ mod copa {
             assert_eq!(j["paper"], NEWSPAPER);
             assert!(j["archive"].as_array().unwrap().len() > 10);
             assert!(j["rumors"][0].get("truth").is_none(), "verdade dos rumores não pode vazar");
+        }
+    }
+
+    mod campinho {
+        use super::super::*;
+        #[test]
+        fn club_colors_distinct_and_live_json_has_pitch_data() {
+            for id in 0..64 { let c = club_colors(id); assert_ne!(c[0].1, c[1].1); }
+            let distinct: std::collections::BTreeSet<_> = (0..64).map(|i| club_colors(i)).collect();
+            assert!(distinct.len() > 30);
+            let mut g = Game::new(5); g.managed = Some(0);
+            g.start_round();
+            for _ in 0..30 { g.step(); }
+            let j = g.live_json(g.teams[0].division);
+            let m = j.as_array().unwrap().iter().find(|m| m["home"] == 0 || m["away"] == 0).unwrap();
+            assert!(m["colors"][0][0].as_str().unwrap().starts_with('#'));
+            assert!(m["strength"][1][0].as_f64().unwrap() > 0.0);
+            assert_eq!(g.team_json(0)["colors"].as_array().unwrap().len(), 3);
+        }
+        #[test]
+        fn injuries_emit_lesao_events() {
+            let mut g = Game::new(11); let mut n = 0;
+            for _ in 0..6 { for m in g.play_round() { n += m.events.iter().filter(|e| e.kind == "lesao").count(); } }
+            assert!(n > 0);
         }
     }
 }

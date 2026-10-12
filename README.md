@@ -127,3 +127,7 @@ Janelas de transferência na pré-temporada (rodadas 1–4) e no meio da tempora
 ## Jornal da rodada
 
 *O Placar Diário* sai após cada rodada (e cada dia de Copa) numa janela com visual de jornal antigo e arquivo das edições anteriores (aba 'Jornal'). Manchetes geradas pelos eventos: goleadas, zebras, hat-tricks, pênaltis, expulsões, mudanças na tabela, Copa, transferências, rumores (alguns verdadeiros, outros não), humor da diretoria e da torcida e demissões de técnicos de outros clubes. Demonstração: `www/?jornal`.
+
+## Campinho animado
+
+Na tela da Rodada, acima da narração, um campinho em pixel art (320×200, estilo 1998) mostra a sua partida ao vivo, guiado pelos eventos do motor minuto a minuto: posse de bola puxada pela força de ataque/defesa, time com a bola subindo junto (laterais apoiando, zaga segurando a linha), chances (trave/defesa/fora), gols (rede balança, som do gol na hora em que a bola entra), cartões, lesões com maca, pênaltis, intervalo, prorrogação e disputa por pênaltis cobrança a cobrança. Cada clube tem duas cores originais (também na Ficha do clube). Opção 'Mostrar campinho' (salva); oculto no modo Rápido; para de desenhar quando minimizado ou com a aba em segundo plano. Demonstração: `www/?campinho`.

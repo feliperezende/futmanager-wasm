@@ -242,3 +242,12 @@ tr.goal-flash td{animation:goalflash 1.6s ease-out}
 .jn-side { flex: 1.3; } .jn-box { border: 1px solid #222; padding: 6px; margin-bottom: 8px; background: #efe4c6; }
 .jn-box h3 { font-size: 14px; margin: 4px 0; } .jn-box h4 { font-size: 13px; margin: 4px 0 0; font-style: italic; } .jn-box p { font-size: 12px; margin: 2px 0; }
 @media (max-width: 600px) { .jn-body { flex-direction: column; } .jn-cols { column-count: 1; } .jn-mast h1 { font-size: 28px; } .jn-head h2 { font-size: 20px; } }
+/* Campinho animado */
+.pitchwin { border: 2px outset #fff; background: #c0c0c0; margin-bottom: 6px; }
+.pitchwin .pw-title { background: linear-gradient(90deg, #000080, #1084d0); color: #fff; font-weight: bold; padding: 2px 3px 2px 5px; display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+.pitchwin .pw-title span:first-child { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.pitchwin .pw-body { border: 2px inset #fff; margin: 3px; line-height: 0; background: #000; }
+.pitchwin canvas { width: 100%; image-rendering: pixelated; image-rendering: crisp-edges; }
+.pitchwin.min .pw-body { display: none; }
+.pitchwin .pw-note:empty { display: none; } .pitchwin .pw-note { padding: 2px 5px; }
+.clubcolor { display: inline-block; width: 12px; height: 12px; border: 1px solid #000; vertical-align: middle; margin-right: 2px; }
