@@ -108,6 +108,10 @@ www/img/        fundo do estádio
 www/style.css   visual retrô
 ```
 
+## Autores
+
+Felipe Rezende e Grok Bot.
+
 ## Licença
 
 MIT

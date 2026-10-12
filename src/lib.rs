@@ -1620,6 +1620,8 @@ impl FutManager {
     }
     pub fn save(&self) -> String { serde_json::to_string(&self.g).unwrap() }
     pub fn state(&self) -> String { self.g.state_json().to_string() }
+    /// Versão do jogo (Cargo.toml).
+    pub fn version() -> String { env!("CARGO_PKG_VERSION").to_string() }
     /// O usuário viu o encerramento da temporada.
     pub fn ack_report(&mut self) { self.g.report_pending = false; }
     /// Ficha de qualquer clube (somente leitura).

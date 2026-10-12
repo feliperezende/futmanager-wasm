@@ -1,4 +1,5 @@
 import init, { FutManager } from '../pkg/futmanager.js';
+import { initDesktop, openAbout } from './desktop.js';
 import { initWM, openWindow, closeWindow, getWindow, closeWhere, tbtn, manageMain } from './wm.js';
 import { openFinale, finaleOpen, renderLiveTable, renderHistory, isFinalStretch } from './finale.js';
 import { initSound, sfx, soundOn, setSound, getVolume, setVolume, played as soundLog, audioState } from './sound.js';
@@ -234,6 +235,7 @@ $('#btnQuit').onclick = () => { if (confirm('Voltar ao menu? Progresso não salv
 initWM();
 $('#mainBtns').innerHTML = tbtn('min', 'wm-min') + tbtn('max', 'wm-max') + tbtn('close', 'wm-close', true);
 const mainWin = manageMain($('#app'), '⚽ FutManager 98');
+let gameVersion = '';
 document.querySelectorAll('.menubar [data-tab]').forEach((b) => b.onclick = () => { if (b.dataset.tab === 'historico') { openHistory(); return; } if (!playing) { tab = b.dataset.tab; render(); } });
 initTeams({ game: () => game, getState: () => st, refresh: () => { refresh(); }, flash, canAct: () => !playing });
 
@@ -591,6 +593,8 @@ function renderFinance() {
 }
 
 await init();
+gameVersion = FutManager.version();
+initDesktop(gameVersion);
 await initStorage();
 showStart();
 
@@ -623,6 +627,22 @@ if (location.search.includes('selftest')) (async () => {
       if (app.offsetLeft !== x0 || app.offsetTop !== y0) throw 'voltar posição';
       if ([...document.querySelectorAll('.titlebar button')].some((b) => !b.classList.contains('tbtn'))) throw 'botão de título fora do padrão';
       out.push('janela_principal=ok');
+      // área de trabalho: ícone Sobre (clique seleciona, duplo clique abre)
+      const ic = $('#icon-sobre');
+      ic.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      if (!ic.classList.contains('sel') || $('#sobre')) throw 'clique simples no ícone';
+      ic.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      const ab = $('#sobre');
+      if (!ab || !ab.textContent.includes('Felipe Rezende e Grok Bot') || !ab.textContent.includes('Versão ' + gameVersion) || !/^\d+\.\d+\.\d+/.test(gameVersion)) throw 'janela Sobre';
+      if (ab.querySelector('a').href !== 'https://github.com/feliperezende/futmanager-wasm') throw 'link do repositório';
+      if (!document.querySelector('#taskbar [data-wkey="sobre"]')) throw 'Sobre na barra de tarefas';
+      if ($('#desktop').getBoundingClientRect().right > app.getBoundingClientRect().left) throw 'janela principal cobre os ícones';
+      $('#aboutOk').click();
+      if ($('#sobre')) throw 'OK não fechou o Sobre';
+      app.querySelector('.wm-min').click();
+      $('#icon-futmanager').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      if (app.classList.contains('wm-min-state')) throw 'ícone FutManager não restaurou';
+      out.push('sobre=ok');
     }
 
     // UI da rodada: pausa no intervalo (Normal) e 2º tempo automático (Rápido)

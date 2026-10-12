@@ -190,3 +190,13 @@ body{padding-bottom:40px}
 @media (max-width:600px){.wm-main{overflow:auto}.wm-main .tbtn-max{display:none}}
 @keyframes goalflash{0%,40%{background:#ffe680}100%{background:transparent}}
 tr.goal-flash td{animation:goalflash 1.6s ease-out}
+
+/* ---- Área de trabalho e "Sobre" ---- */
+#desktop{position:absolute;left:8px;top:12px;display:flex;flex-direction:column;gap:14px;width:76px;z-index:1}
+.dicon{display:flex;flex-direction:column;align-items:center;gap:3px;cursor:default;user-select:none;color:#fff;text-align:center;outline:none}
+.dicon span{font-size:12px;padding:1px 3px;text-shadow:1px 1px 0 #000;border:1px dotted transparent}
+.dicon.sel svg{filter:sepia(1) hue-rotate(190deg) saturate(4) brightness(.75)}
+.dicon.sel span{background:#000080;border-color:#ff0;text-shadow:none}
+.about{display:flex;gap:14px;align-items:flex-start}.about h2{margin:0 0 2px}.about p{margin:8px 0}
+.about-logo svg{width:64px;height:64px}
+.about-ok{text-align:right}.about-ok button{min-width:75px}

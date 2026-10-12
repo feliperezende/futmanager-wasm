@@ -122,9 +122,9 @@ export function manageMain(el, title) {
   maxBtn()?.addEventListener('click', toggle);
   el.querySelector('.titlebar').addEventListener('dblclick', (e) => { if (!e.target.closest('button') && !isMobile()) toggle(); });
   let p = null; try { p = JSON.parse(localStorage.getItem(MAIN_KEY)); } catch (e) { p = null; }
-  const width = Math.min(1100, window.innerWidth - 32);
+  const width = Math.min(1100, window.innerWidth - 120);
   if (!isMobile()) el.style.width = width + 'px';
-  el.style.left = (p && Number.isFinite(p.x) ? Math.max(-width + 80, Math.min(window.innerWidth - 80, p.x)) : Math.max(0, (window.innerWidth - width) / 2 - 8)) + 'px';
+  el.style.left = (p && Number.isFinite(p.x) ? Math.max(-width + 80, Math.min(window.innerWidth - 80, p.x)) : Math.max(96, (window.innerWidth - width) / 2 + 40)) + 'px';
   el.style.top = (p && Number.isFinite(p.y) ? Math.max(0, p.y) : 8) + 'px';
   if (p && p.max) setMax(true);
   w.maximize = () => setMax(true); w.unmaximize = () => setMax(false); w.toggleMax = toggle;
