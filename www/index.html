@@ -2,12 +2,13 @@
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FutManager 98 — Gerenciador de Futebol</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div class="window" id="app">
-  <div class="titlebar"><span>⚽ FutManager 98</span><span id="status"></span></div>
+  <div class="titlebar"><span>⚽ FutManager 98</span><span class="tb-btns"><span>_</span><span>□</span><span>×</span></span></div>
   <div id="start" class="panel">
     <h1>FutManager 98</h1>
     <p>Gerenciador de futebol com 4 divisões de clubes fictícios.</p>
@@ -21,15 +22,15 @@
   </div>
   <div id="main" class="hidden">
     <div class="menubar">
-      <button data-tab="clube">Clube</button>
-      <button data-tab="jogos">Rodada</button>
-      <button data-tab="tabela">Classificação</button>
-      <button data-tab="mercado">Mercado</button>
-      <button data-tab="base">Base</button>
-      <button data-tab="financas">Finanças</button>
+      <button data-tab="clube" title="Elenco, escalação e tática">Clube</button>
+      <button data-tab="jogos" title="Jogar a próxima rodada ao vivo">Rodada</button>
+      <button data-tab="tabela" title="Tabelas das 4 divisões e artilharia">Classificação</button>
+      <button data-tab="mercado" title="Comprar ou pegar jogadores emprestados">Mercado</button>
+      <button data-tab="base" title="Categorias de base">Base</button>
+      <button data-tab="financas" title="Caixa, estádio, ingresso e banco">Finanças</button>
       <span class="sep"></span>
-      <button id="btnSave">Salvar</button>
-      <button id="btnQuit">Menu</button>
+      <button id="btnSave" title="Salvar em um dos 5 slots">💾 Salvar</button>
+      <button id="btnQuit" title="Voltar ao menu inicial">Menu</button>
     </div>
     <div id="msg" class="msg"></div>
     <section id="tab-clube" class="tab"></section>
@@ -39,6 +40,7 @@
     <section id="tab-financas" class="tab"></section>
     <section id="tab-base" class="tab"></section>
   </div>
+  <div class="statusbar" id="status"></div>
 </div>
 <div id="slots" class="modal hidden"><div class="window"><div class="titlebar"><span id="slotsTitle">Jogos salvos</span><span><button id="slotsClose">X</button></span></div><div class="panel" id="slotsBody"></div></div></div>
 <script type="module" src="main.js"></script>

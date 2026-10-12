@@ -25,3 +25,62 @@ tr.down td:first-child{border-left:4px solid #c00}
 .pos-G{color:#a06000}.pos-D{color:#0050a0}.pos-M{color:#007000}.pos-A{color:#b00000}
 fieldset{border:2px groove #fff;margin-bottom:8px}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center}.modal .window{min-width:520px}
+
+/* ---- Polimento da interface ---- */
+*{box-sizing:border-box}
+.titlebar{align-items:center}
+.tb-btns{display:flex;gap:2px}
+.tb-btns span{display:inline-block;width:16px;height:14px;line-height:11px;text-align:center;font-size:11px;background:#c0c0c0;color:#000;border:1px solid;border-color:#fff #404040 #404040 #fff}
+.menubar{flex-wrap:wrap;align-items:center}
+.menubar button{min-width:76px}
+.menubar button.active{background:#fff;border-color:#404040 #fff #fff #404040;font-weight:bold;position:relative}
+.statusbar{display:flex;gap:3px;padding:3px;border-top:1px solid #808080;flex-wrap:wrap}
+.statusbar:empty{display:none}
+.statusbar .seg{border:1px solid;border-color:#808080 #fff #fff #808080;padding:1px 8px;white-space:nowrap}
+.statusbar .seg:first-child{font-weight:bold;flex:1;min-width:120px}
+.statusbar .seg.neg{color:#c00;font-weight:bold}
+.msg{min-height:0;padding:3px 10px}
+.msg:empty{padding:0}
+.tab>p.big:first-of-type,#nextLabel{margin:6px 0}
+th.n,td.n{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+td,th{vertical-align:middle}
+th[title]{cursor:help}
+td button,td .btn{padding:1px 6px;font-size:12px;margin:1px 0}
+td:last-child{white-space:nowrap}
+tr:hover td{background:#e8f0ff}
+tr.me td,tr.me:hover td{background:#ffff9c;font-weight:bold}
+#scoreboard td:nth-child(2){text-align:center;white-space:nowrap;font-weight:bold}
+.list{max-height:max(320px,calc(100vh - 300px))}
+button:disabled{color:#808080;text-shadow:1px 1px #fff;cursor:default}
+button:focus-visible{outline:1px dotted #000;outline-offset:-4px}
+fieldset{padding:6px 10px 8px}
+fieldset legend{padding:0 4px}
+.panel h1{margin:4px 0 8px}
+.ticker{line-height:1.35}
+.ticker .chance{color:#9f9}
+.clock{vertical-align:middle}
+#period{vertical-align:middle;margin-left:6px}
+.modal .window{max-width:96vw;max-height:92vh;overflow:auto}
+.modal .titlebar button{padding:0 6px;min-width:0;font-weight:bold;line-height:14px}
+small{color:#333}
+
+@media (max-width:640px){
+  body{padding:4px;font-size:12px}
+  .window{max-width:100%}
+  .panel,.tab{padding:6px}
+  .menubar button{min-width:0;padding:3px 6px;flex:1 1 auto}
+  .menubar .sep{display:none}
+  .cols{flex-direction:column}
+  .cols>div{min-width:0;width:100%}
+  table{display:block;overflow-x:auto;white-space:nowrap;width:100%}
+  table>tbody{display:table;width:100%}
+  .ticker{height:200px;font-size:11px}
+  .clock{font-size:22px}
+  .modal .window{min-width:0;width:96vw}
+  fieldset select,fieldset input{max-width:100%}
+  .statusbar .seg:first-child{flex-basis:100%}
+}
+label{white-space:nowrap}
+[data-stad]{min-width:300px;text-align:left;display:block;margin:2px 0}
+#bankAmt,#tprice,#mmax{width:130px}
+@media (max-width:640px){[data-stad]{min-width:0;width:100%}}

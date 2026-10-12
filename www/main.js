@@ -5,15 +5,58 @@ const SLOTS = 5;
 const slotKey = (n) => `futmanager98_slot_${n}`;
 const metaKey = (n) => `futmanager98_meta_${n}`;
 const $ = (s) => document.querySelector(s);
-const money = (v) => 'R$ ' + Math.round(v).toLocaleString('pt-BR');
+const money = (v) => { const n = Math.round(v); return (n < 0 ? '−' : '') + 'R$ ' + Math.abs(n).toLocaleString('pt-BR'); };
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 let game = null, st = null, tab = 'clube', selected = [], playing = false;
+
+// Barra de status (segmentos estilo Windows 98)
+function setBar(text) {
+  $('#status').innerHTML = text.split(' | ').map((t) => `<span class="seg">${esc(t)}</span>`).join('');
+  const cash = [...$('#status').children].find((c) => c.textContent.startsWith('Caixa'));
+  if (cash && cash.textContent.includes('−')) cash.classList.add('neg');
+}
+
+// Pós-processamento das tabelas: alinha números à direita e adiciona dicas nos cabeçalhos
+const TIPS = { 'Tit.': 'Titular — marque exatamente 11 jogadores', Pos: 'Posição: G goleiro, D defensor, M meio-campista, A atacante',
+  'Hab.': 'Habilidade geral (0–99)', 'Físico': 'Condição física atual (cansaço)', Moral: 'Moral: afeta o rendimento em até ±10%',
+  Contrato: 'Última temporada do contrato (vermelho = termina nesta temporada)', Gols: 'Gols na temporada', J: 'Jogos', V: 'Vitórias',
+  E: 'Empates', D: 'Derrotas', GP: 'Gols pró', GC: 'Gols contra', SG: 'Saldo de gols', Pts: 'Pontos', '#': 'Posição na tabela',
+  'Público': 'Pagantes no estádio', Renda: 'Bilheteria do mandante', 'Salário/rod.': 'Salário pago a cada rodada', Valor: 'Valor de mercado estimado',
+  'Preço': 'Quanto custa contratar agora', Idade: 'Idade em anos' };
+const NUM = /^\s*[−-]?(R\$\s?)?[−-]?\d[\d.,]*\s*(%|M|k)?(\s*\(.*\))?\s*$/;
+function polishTables(root) {
+  root.querySelectorAll('table').forEach((t) => {
+    const rows = [...t.rows];
+    if (!rows.length) return;
+    const head = rows[0];
+    const numericCol = {};
+    rows.slice(1).forEach((r) => [...r.cells].forEach((c, i) => {
+      const txt = c.textContent.trim();
+      if (!txt || txt === '—' || c.querySelector('button,input,select')) return;
+      const isNum = NUM.test(txt) || /^até T\d+$/.test(txt);
+      numericCol[i] = numericCol[i] || { n: 0, t: 0 };
+      numericCol[i].t++; if (isNum) numericCol[i].n++;
+      if (NUM.test(txt)) c.classList.add('n');
+    }));
+    [...head.cells].forEach((h, i) => {
+      if (h.tagName === 'TH' && numericCol[i] && numericCol[i].n / numericCol[i].t > 0.6) h.classList.add('n');
+      const tip = TIPS[h.textContent.trim()];
+      if (tip && !h.title) h.title = tip;
+    });
+  });
+}
+let polishQueued = false;
+new MutationObserver(() => {
+  if (polishQueued) return;
+  polishQueued = true;
+  requestAnimationFrame(() => { polishQueued = false; polishTables(document.getElementById('app')); });
+}).observe(document.getElementById('app'), { childList: true, subtree: true });
 
 function flash(r) { $('#msg').textContent = r.msg || r; $('#msg').style.color = r.ok === false ? '#a00' : '#000080'; }
 function refresh() { st = JSON.parse(game.state()); render(); }
 
 // ------------------------------------------------ Início
-function showStart() { anySave().then((v) => { $('#btnLoad').disabled = !v; }); $('#start').classList.remove('hidden'); $('#main').classList.add('hidden'); $('#pickTeam').classList.add('hidden'); }
+function showStart() { $('#status').innerHTML = ''; anySave().then((v) => { $('#btnLoad').disabled = !v; }); $('#start').classList.remove('hidden'); $('#main').classList.add('hidden'); $('#pickTeam').classList.add('hidden'); }
 $('#btnNew').onclick = () => {
   game = new FutManager(Math.floor(Math.random() * 1e9));
   st = JSON.parse(game.state());
@@ -188,7 +231,7 @@ document.querySelectorAll('.menubar [data-tab]').forEach((b) => b.onclick = () =
 function renderFired() {
   document.querySelectorAll('.tab').forEach((s) => s.classList.add('hidden'));
   $('#tab-clube').classList.remove('hidden');
-  $('#status').textContent = `Desempregado | Temporada ${st.season}`;
+  setBar(`Desempregado | Temporada ${st.season}`);
   $('#tab-clube').innerHTML = `<fieldset><legend>Você foi demitido!</legend>
     <div>${st.news.map((n) => `<div>📰 ${esc(n)}</div>`).join('')}</div>
     <p>A diretoria perdeu a paciência com as dívidas. Estes clubes fizeram propostas:</p>
@@ -201,7 +244,7 @@ function renderFired() {
 function render() {
   if (!st.managed) return renderFired();
   const m = st.managed;
-  $('#status').textContent = `${m.name} | Div ${m.division + 1} | Temporada ${st.season} | Rodada ${Math.min(st.round + 1, st.rounds)}/${st.rounds} | ${money(m.budget)}`;
+  setBar(`${m.name} | Divisão ${m.division + 1} | Temporada ${st.season} | Rodada ${Math.min(st.round + 1, st.rounds)}/${st.rounds} | Caixa: ${money(m.budget)}`);
   document.querySelectorAll('.tab').forEach((s) => s.classList.add('hidden'));
   document.querySelectorAll('.menubar [data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
   $('#tab-' + tab).classList.remove('hidden');
@@ -229,7 +272,7 @@ function renderClub() {
       Mentalidade: <select id="mentality">${m.mentalities.map((x) => `<option ${x === m.tactic ? 'selected' : ''}>${x}</option>`).join('')}</select>
       <label><input type="checkbox" id="pressing" ${m.pressing ? 'checked' : ''}> Marcação pressão</label>
       <button id="btnAuto">Escalação automática</button> <button id="btnSaveLineup">Confirmar escalação</button>
-      <span id="lineupInfo"></span> &nbsp; Moral do elenco: ${moraleIcon(m.morale)}
+      <span id="lineupInfo"></span> &nbsp; <span style="white-space:nowrap" title="Média da moral do elenco">Moral do elenco: ${moraleIcon(m.morale)}</span>
     </fieldset>
     <div class="list"><table><tr><th>Tit.</th><th>Pos</th><th>Nome</th><th>Hab.</th><th title="Finalização/Passe/Marcação/Goleiro/Resistência">Fin/Pas/Mar/Gol/Res</th><th>Físico</th><th>Idade</th><th>Salário/rod.</th><th>Valor</th><th>Gols</th><th>Moral</th><th>Contrato</th><th></th></tr>
     ${squad.map((p) => `<tr><td><input type="checkbox" data-id="${p.id}" ${selected.includes(p.id) ? 'checked' : ''}></td>${playerRow(p, `<td><small>${attrs(p)}</small></td><td>${p.condition}%</td>`, true)}${(`<td>${p.goals}</td><td>${moraleIcon(p.morale)}</td><td style="${p.contractUntil <= st.season ? 'color:#c00;font-weight:bold' : ''}">${p.loanFrom ? '—' : 'até T' + p.contractUntil}</td><td>${p.loanFrom ? `<small>Emprestado pelo ${esc(p.loanFrom)}</small>` : `<button data-sell="${p.id}">Vender (${money(p.sellPrice)})</button> <button data-loanout="${p.id}">Emprestar</button> <button data-renew="${p.id}">Renovar</button>`}</td>`)}</tr>`).join('')}
@@ -278,7 +321,7 @@ function renderRound() {
   const myGame = mine.find((x) => x.home === m.id || x.away === m.id);
   $('#tab-jogos').innerHTML = `
     <div>${st.news.map((n) => `<div>📰 ${esc(n)}</div>`).join('')}</div>
-    <p class="big">Próximo jogo: ${myGame ? `${esc(myGame.homeName)} x ${esc(myGame.awayName)}` : '—'}</p>
+    <p class="big" id="nextLabel">Próximo jogo: ${myGame ? `${esc(myGame.homeName)} x ${esc(myGame.awayName)}` : '—'}</p>
     <button id="btnPlay">▶ Jogar rodada</button> <button id="btnHalf" class="hidden">▶ Iniciar 2º tempo</button>
     <button id="btnPause" class="hidden">⏸ Pausar</button> <button id="btnSkip" class="hidden">⏩ Pular para o fim</button>
     &nbsp; Velocidade: <select id="speed">${Object.entries(SPEEDS).map(([k, v]) => `<option value="${k}" ${k === getSpeed() ? 'selected' : ''}>${v.label}</option>`).join('')}</select>
@@ -355,6 +398,7 @@ function finishLive() {
   $('#ticker').insertAdjacentHTML('afterbegin', `<div class="gol">FIM DE JOGO! ${att}</div>${st.news.map((n) => `<div>📰 ${esc(n)}</div>`).join('')}`);
   $('#btnSkip').classList.add('hidden'); $('#btnPause').classList.add('hidden'); $('#btnHalf').classList.add('hidden');
   $('#period').textContent = 'Fim de jogo';
+  if (myMatch) $('#nextLabel').textContent = `Resultado: ${myMatch.homeName} ${myMatch.hg} x ${myMatch.ag} ${myMatch.awayName}`;
   if (document.getElementById('subs')) $('#subs').innerHTML = '';
   if (st.managed) renderRoundSummary(st.managed.lastRound, myMatch);
   $('#btnPlay').disabled = false; $('#btnPlay').textContent = '▶ Próxima rodada';
@@ -366,7 +410,7 @@ function renderRoundSummary(f, myMatch) {
   const isHome = myMatch && myMatch.home === st.managed.id;
   const income = f.tickets + f.tv + f.transfers_in + f.prizes + f.bank_in + Math.max(0, f.loan_fees);
   const costs = f.salaries + f.upkeep + f.investments + f.transfers_out + f.bank_paid + Math.max(0, -f.loan_fees);
-  const row = (l, v, neg) => v ? `<tr><td>${l}</td><td style="text-align:right;${neg ? 'color:#a00' : ''}">${neg ? '-' : ''}${money(v)}</td></tr>` : '';
+  const row = (l, v, neg) => v ? `<tr><td>${l}</td><td class="n" style="${neg ? 'color:#a00' : ''}">${money(neg ? -v : v)}</td></tr>` : '';
   $('#roundSummary').innerHTML = `<fieldset><legend>Finanças da rodada — ${esc(st.managed.name)}</legend><table>
     ${row(isHome ? `Bilheteria (${myMatch.attendance.toLocaleString('pt-BR')} pagantes)` : 'Bilheteria', f.tickets) || `<tr><td>Bilheteria</td><td style="text-align:right">${isHome ? money(0) : 'jogo fora de casa'}</td></tr>`}
     ${row('Cotas de TV/patrocínio', f.tv)}${row('Prêmios', f.prizes)}${row('Vendas de jogadores', f.transfers_in)}${row('Empréstimo bancário recebido', f.bank_in)}
@@ -377,7 +421,7 @@ function renderRoundSummary(f, myMatch) {
 function setStatus() {
   const m = st.managed;
   if (!m) { $('#btnPlay').onclick = () => render(); $('#btnPlay').textContent = '▶ Continuar'; return; }
-  $('#status').textContent = `${m.name} | Div ${m.division + 1} | Temporada ${st.season} | Rodada ${Math.min(st.round + 1, st.rounds)}/${st.rounds} | ${money(m.budget)}`;
+  setBar(`${m.name} | Divisão ${m.division + 1} | Temporada ${st.season} | Rodada ${Math.min(st.round + 1, st.rounds)}/${st.rounds} | Caixa: ${money(m.budget)}`);
 }
 
 let subsKey = '';
@@ -426,7 +470,7 @@ function renderMarket() {
   const list = JSON.parse(game.market(mkPos, max));
   $('#tab-mercado').innerHTML = `
     Posição: <select id="mpos">${['', 'G', 'D', 'M', 'A'].map((p) => `<option value="${p}" ${p === mkPos ? 'selected' : ''}>${p || 'Todas'}</option>`).join('')}</select>
-    Preço máximo: <input id="mmax" type="number" value="${max}" step="100000"> <button id="mgo">Filtrar</button>
+    Preço máximo (R$): <input id="mmax" title="Mostra apenas jogadores até este preço" type="number" value="${max}" step="100000"> <button id="mgo">Filtrar</button>
     <span>Orçamento: <b>${money(st.managed.budget)}</b> — Elenco: ${st.managed.squad.length}/28</span>
     <div class="list"><table><tr><th>Pos</th><th>Nome</th><th>Hab.</th><th>Idade</th><th>Salário/rod.</th><th>Valor</th><th>Clube</th><th>Preço</th><th></th></tr>
     ${list.map((p) => `<tr>${playerRow(p, `<td>${esc(p.teamName)}</td><td>${money(p.buyPrice)}</td><td><button data-buy="${p.id}">Comprar</button>${p.team !== null ? ` <button data-loanin="${p.id}">Empréstimo (${money(p.loanFee)})</button>` : ''}</td>`)}</tr>`).join('')}
@@ -460,19 +504,19 @@ function renderFinance() {
     <tr><td>Cotas de TV/patrocínio</td><td>${money(f.tv)}</td></tr>
     <tr><td>Vendas de jogadores</td><td>${money(f.transfers_in)}</td></tr>
     <tr><td>Premiações</td><td>${money(f.prizes)}</td></tr>
-    <tr><td>Salários pagos</td><td>-${money(f.salaries)}</td></tr>
-    <tr><td>Compras de jogadores</td><td>-${money(f.transfers_out)}</td></tr>
-    <tr><td>Manutenção (base/estádio)</td><td>-${money(f.upkeep)}</td></tr>
-    <tr><td>Investimentos</td><td>-${money(f.investments)}</td></tr>
+    <tr><td>Salários pagos</td><td>${money(-f.salaries)}</td></tr>
+    <tr><td>Compras de jogadores</td><td>${money(-f.transfers_out)}</td></tr>
+    <tr><td>Manutenção (base/estádio)</td><td>${money(-f.upkeep)}</td></tr>
+    <tr><td>Investimentos</td><td>${money(-f.investments)}</td></tr>
     <tr><td>Empréstimos bancários recebidos</td><td>${money(f.bank_in)}</td></tr>
-    <tr><td>Parcelas pagas ao banco</td><td>-${money(f.bank_paid)}</td></tr>
+    <tr><td>Parcelas pagas ao banco</td><td>${money(-f.bank_paid)}</td></tr>
     <tr><td>Taxas de empréstimo de jogadores (saldo)</td><td>${money(f.loan_fees)}</td></tr>
     <tr><td><b>Saldo da temporada</b></td><td><b>${money(bal)}</b></td></tr>
     <tr><td><b>Caixa atual</b></td><td><b>${money(m.budget)}</b></td></tr>
   </table></div><div><fieldset><legend>Estádio</legend>
     Capacidade: ${m.capacity.toLocaleString('pt-BR')} lugares<br>Folha salarial por rodada: ${money(m.wageBill)}<br><br>
     Preço do ingresso: <input id="tprice" type="number" min="${m.ticketRange[0]}" max="${m.ticketRange[1]}" value="${m.ticketPrice}"> <button id="tsave">Alterar</button>
-    <small>(faixa: ${money(m.ticketRange[0])} a ${money(m.ticketRange[1])}; o preço é mantido entre temporadas)</small><br>
+    <br><small>(faixa: ${money(m.ticketRange[0])} a ${money(m.ticketRange[1])}; o preço é mantido entre temporadas)</small><br>
     Público esperado no próximo jogo em casa: ~${m.expectedAttendance.toLocaleString('pt-BR')}<br>
     Manutenção do estádio: ${money(m.stadiumUpkeep)} por rodada
   </fieldset><fieldset><legend>Banco</legend>
@@ -481,7 +525,7 @@ function renderFinance() {
     ${m.loanedOut.length ? `<br>Emprestados a outros clubes: ${m.loanedOut.map((p) => esc(p.name) + ' (' + esc(p.teamName) + ')').join(', ')}` : ''}
   </fieldset><fieldset><legend>Ampliação do estádio</legend>
     ${m.construction ? `🏗️ Obra em andamento: +${m.construction.seats.toLocaleString('pt-BR')} lugares, faltam ${m.construction.rounds_left} rodada(s).`
-      : m.stadiumOptions.map((o, i) => `<button data-stad="${i}">+${o.seats.toLocaleString('pt-BR')} lugares — ${money(o.cost)} (${o.rounds} rodadas)</button>`).join('<br>')}
+      : m.stadiumOptions.map((o, i) => `<button data-stad="${i}">+${o.seats.toLocaleString('pt-BR')} lugares — ${money(o.cost)} (${o.rounds} rodadas)</button>`).join('')}
     <br><small>Ampliar só aumenta o público se a procura for maior que a capacidade. Ingressos caros reduzem a procura.</small>
   </fieldset></div></div>`;
   $('#bankTake').onclick = () => { flash(JSON.parse(game.take_bank_loan(+$('#bankAmt').value))); refresh(); };
