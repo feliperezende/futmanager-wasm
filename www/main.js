@@ -1,6 +1,7 @@
 import init, { FutManager } from '../pkg/futmanager.js';
 import { initDesktop, openAbout } from './desktop.js';
 import { openCup, openDraw, animateShootout } from './cup.js';
+import { windowLabel, windowBanner, openOffers, openNegotiation, auctionHtml, openTransfers } from './market.js';
 import { initWM, openWindow, closeWindow, getWindow, closeWhere, tbtn, manageMain } from './wm.js';
 import { openFinale, finaleOpen, renderLiveTable, renderHistory, isFinalStretch } from './finale.js';
 import { initSound, sfx, soundOn, setSound, getVolume, setVolume, played as soundLog, audioState } from './sound.js';
@@ -59,7 +60,7 @@ new MutationObserver(() => {
   requestAnimationFrame(() => { polishQueued = false; polishTables(document.getElementById('app')); });
 }).observe(document.getElementById('app'), { childList: true, subtree: true });
 
-function flash(r) { $('#msg').textContent = r.msg || r; $('#msg').style.color = r.ok === false ? '#a00' : '#000080'; }
+function flash(r) { $('#msg').textContent = r.msg || r; $('#msg').style.color = r.ok === false && r.status !== 'counter' ? '#a00' : '#000080'; }
 function refresh() { st = JSON.parse(game.state()); render(); }
 
 // ------------------------------------------------ Início
@@ -258,14 +259,16 @@ function renderFired() {
 function render() {
   if (!st.managed) return renderFired();
   const m = st.managed;
-  setBar(`${m.name} | Divisão ${m.division + 1} | Temporada ${st.season} | Rodada ${Math.min(st.round + 1, st.rounds)}/${st.rounds} | Caixa: ${money(m.budget)}`);
+  setBar(`${m.name} | Divisão ${m.division + 1} | Temporada ${st.season} | Rodada ${Math.min(st.round + 1, st.rounds)}/${st.rounds} | ${windowLabel(st.market)} | Caixa: ${money(m.budget)}`);
   document.querySelectorAll('.tab').forEach((s) => s.classList.add('hidden'));
   document.querySelectorAll('.menubar [data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
   $('#tab-' + tab).classList.remove('hidden');
   ({ clube: renderClub, jogos: renderRound, tabela: renderTable, mercado: renderMarket, base: renderAcademy, financas: renderFinance, times: () => renderTeamsTab(st, $('#tab-times')) })[tab]();
   if (st.reportPending && !playing) showFinale();
   else if (st.cup && st.cup.drawPending && !playing) showDraw();
+  else if (st.market.unseen && st.market.offers.length && !playing && !getWindow('sorteio')) openOffers(st, mctx);
 }
+const mctx = { get game() { return game; }, refresh: () => refresh(), flash: (r) => flash(r) };
 function showDraw() {
   if (getWindow('sorteio') || finaleOpen()) return;
   openDraw(st, () => { game.ack_cup_draw(); st = JSON.parse(game.state()); });
@@ -503,7 +506,7 @@ function renderRoundSummary(f, myMatch) {
 function setStatus() {
   const m = st.managed;
   if (!m) { $('#btnPlay').onclick = () => render(); $('#btnPlay').textContent = '▶ Continuar'; return; }
-  setBar(`${m.name} | Divisão ${m.division + 1} | Temporada ${st.season} | Rodada ${Math.min(st.round + 1, st.rounds)}/${st.rounds} | Caixa: ${money(m.budget)}`);
+  setBar(`${m.name} | Divisão ${m.division + 1} | Temporada ${st.season} | Rodada ${Math.min(st.round + 1, st.rounds)}/${st.rounds} | ${windowLabel(st.market)} | Caixa: ${money(m.budget)}`);
 }
 
 let subsKey = '';
@@ -554,13 +557,20 @@ function renderMarket() {
     Posição: <select id="mpos">${['', 'G', 'D', 'M', 'A'].map((p) => `<option value="${p}" ${p === mkPos ? 'selected' : ''}>${p || 'Todas'}</option>`).join('')}</select>
     Preço máximo (R$): <input id="mmax" title="Mostra apenas jogadores até este preço" type="number" value="${max}" step="100000"> <button id="mgo">Filtrar</button>
     <span>Orçamento: <b>${money(st.managed.budget)}</b> — Elenco: ${st.managed.squad.length}/28</span>
+    ${windowBanner(st.market)}
+    <div class="mkbtns"><button id="mkOffers">📨 Propostas recebidas (${st.market.offers.length})</button> <button id="mkTransfers">📋 Transferências</button></div>
+    ${auctionHtml(st.market)}
     <div class="list"><table><tr><th>Pos</th><th>Nome</th><th>Hab.</th><th>Idade</th><th>Salário/rod.</th><th>Valor</th><th>Clube</th><th>Preço</th><th></th></tr>
     ${list.map((p) => `<tr>${playerRow(p, `<td>${teamLink(p.team, p.teamName)}</td>
-<td>${money(p.buyPrice)}</td><td><button data-buy="${p.id}">Comprar</button>${p.team !== null ? ` <button data-loanin="${p.id}">Empréstimo (${money(p.loanFee)})</button>` : ''}</td>`)}</tr>`).join('')}
-    </table></div><small>Jogadores sem clube custam 20% do valor (luvas); de outros clubes, 110% do valor. Empréstimo: 10% do valor até o fim da temporada (você paga o salário).</small>`;
+<td>${money(p.buyPrice)}</td><td>${p.team === null ? `<button data-buy="${p.id}">Contratar</button>` : `<button data-neg="${p.id}" ${st.market.open ? '' : 'disabled title="Janela fechada"'}>Negociar</button>`}${p.team !== null ? ` <button data-loanin="${p.id}">Empréstimo (${money(p.loanFee)})</button>` : ''}</td>`)}</tr>`).join('')}
+    </table></div><small>Jogadores sem clube custam 20% do valor (luvas) e podem ser contratados a qualquer momento; de outros clubes, só com a janela aberta e por negociação (preço pedido: 110% do valor). Empréstimo: 10% do valor até o fim da temporada (você paga o salário).</small>`;
   $('#mgo').onclick = () => { mkPos = $('#mpos').value; mkMax = $('#mmax').value; renderMarket(); };
   document.querySelectorAll('[data-loanin]').forEach((b) => b.onclick = () => { flash(JSON.parse(game.loan_in(+b.dataset.loanin))); refresh(); });
   document.querySelectorAll('[data-buy]').forEach((b) => b.onclick = () => { flash(JSON.parse(game.buy(+b.dataset.buy))); refresh(); });
+  document.querySelectorAll('[data-neg]').forEach((b) => b.onclick = () => openNegotiation(list.find((p) => p.id === +b.dataset.neg), st, mctx));
+  $('#mkOffers').onclick = () => openOffers(st, mctx);
+  $('#mkTransfers').onclick = () => openTransfers(st);
+  const bid = $('#bidGo'); if (bid) bid.onclick = () => { flash(JSON.parse(game.bid_auction(+$('#bidAmt').value))); refresh(); };
 }
 
 function renderAcademy() {
@@ -777,6 +787,39 @@ if (location.search.includes('selftest')) (async () => {
     out.push('jogos=' + r.length);
     const mk = JSON.parse(game.market('', 1e12));
     out.push('mercado=' + mk.length);
+    {
+      const ms = JSON.parse(game.state());
+      if (!ms.market || !/Mercado (aberto|fechado)/.test($('#status').textContent)) throw 'mercado: status sem janela';
+      const other = mk.find((p) => p.team !== null && p.team !== ms.managed.id);
+      if (ms.market.open) {
+        const r1 = JSON.parse(game.negotiate(other.id, 1000));
+        if (!['rejected', 'refused'].includes(r1.status)) throw 'mercado: proposta baixa aceita ' + r1.msg;
+        // UI de negociação
+        openNegotiation(other, ms, mctx);
+        $('#negAmt').value = 2000; $('#negGo').click();
+        if (!/recus|encerrou/.test($('#negMsg').textContent)) throw 'mercado: janela de negociação';
+        closeWindow('negociar');
+        // contraproposta / acordo: sobe a oferta até o clube responder
+        let got = null;
+        const seen = [];
+        for (const p of JSON.parse(game.market('', ms.managed.budget)).filter((p) => p.team !== null && p.team !== ms.managed.id).reverse().slice(0, 40)) {
+          const r = JSON.parse(game.negotiate(p.id, Math.round(p.buyPrice * 0.9)));
+          seen.push(r.status || r.msg);
+          if (r.status === 'counter' || r.status === 'accepted') { got = r; break; }
+        }
+        if (!got) throw 'mercado: nenhuma contraproposta ' + seen.slice(0, 5);
+      } else if (JSON.parse(game.negotiate(other.id, 1e6)).ok) throw 'mercado: compra com janela fechada';
+      tab = 'mercado'; refresh();
+      if (!$('.mkbanner') || !$('#mkOffers')) throw 'mercado: aba sem janela/propostas';
+      $('#mkOffers').click();
+      if (!getWindow('propostas')) throw 'mercado: janela de propostas';
+      closeWindow('propostas');
+      $('#mkTransfers').click();
+      if (!getWindow('transferencias')) throw 'mercado: transferências';
+      closeWindow('transferencias');
+      tab = 'clube'; refresh();
+      out.push('mercado_vivo=ok');
+    }
     const ac = JSON.parse(game.state()).managed.academy;
     if (!JSON.parse(game.promote_youth(ac[0].id)).ok) throw 'promoção falhou';
     out.push('base=ok');
@@ -924,4 +967,19 @@ if (location.search.includes('demo')) {
   document.querySelector('#teamList button').click();
   tab = 'jogos'; render();
   $('#btnPlay').click();
+}
+// Demonstração do mercado: index.html?mercado avança até haver propostas e um leilão (janela aberta).
+if (location.search.includes('mercado')) {
+  $('#btnNew').click();
+  document.querySelector('#teamList button').click();
+  const snap = game.save();
+  for (let i = 0; i < 40; i++) {
+    game = FutManager.load(snap); game.choose_team(JSON.parse(game.state()).teams[i].id);
+    let ok = false;
+    for (let r = 0; r < 3 && !ok; r++) { game.play_round(); const m = JSON.parse(game.state()).market; ok = m.open && m.offers.length > 0 && !!m.auction; }
+    if (ok) break;
+  }
+  closeWhere(() => true);
+  mkMax = '4000000';
+  tab = 'mercado'; refresh();
 }

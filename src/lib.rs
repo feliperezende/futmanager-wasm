@@ -180,6 +180,21 @@ pub struct CupTie { pub home: usize, pub away: usize, pub hg: u32, pub ag: u32, 
 pub struct Cup { pub season: u32, pub round: usize, pub ties: Vec<Vec<CupTie>>, pub winner: Option<usize>, pub draw_pending: bool }
 
 pub const MAX_SUBS: u8 = 3;
+
+/// Janelas de transferência: (primeira rodada, rodada em que fecha, nome). Fora delas só jogadores livres.
+pub const TRANSFER_WINDOWS: [(usize, usize, &str); 2] = [(0, 4, "pré-temporada"), (14, 18, "meio de temporada")];
+/// Proposta de um clube da IA por um jogador do usuário.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Offer { pub id: u32, pub player: usize, pub club: usize, pub amount: i64, pub max_pay: i64, pub rounds_left: u32, pub countered: bool }
+/// Negociação em andamento do usuário por um jogador de outro clube.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Negotiation { pub player: usize, pub counter: i64, pub attempts: u32 }
+/// Leilão de um jogador por um clube endividado.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Auction { pub player: usize, pub seller: usize, pub min_bid: i64, pub user_bid: i64, pub rounds_left: u32 }
+/// Registro de transferência (para o jornal e relatórios).
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct TransferRec { pub season: u32, pub round: usize, pub player: usize, pub name: String, pub from: Option<usize>, pub to: usize, pub fee: i64, pub kind: String }
 /// Chance de gol de bola rolando por minuto (time médio)
 pub const OPEN_PLAY_GOAL: f64 = 0.0107;
 /// Chance de pênalti por time por minuto (~0,25 por jogo)
@@ -312,6 +327,19 @@ pub struct Game {
     pub history: Vec<serde_json::Value>,
     #[serde(default)]
     pub cup: Cup,
+    #[serde(default)]
+    pub offers: Vec<Offer>,
+    #[serde(default)]
+    pub next_offer_id: u32,
+    #[serde(default)]
+    pub negotiations: Vec<Negotiation>,
+    #[serde(default)]
+    pub auction: Option<Auction>,
+    #[serde(default)]
+    pub transfers: Vec<TransferRec>,
+    /// Ofertas novas ainda não vistas pelo usuário
+    #[serde(default)]
+    pub offers_unseen: bool,
 }
 
 pub const FORMATIONS: [&str; 5] = ["4-4-2", "4-3-3", "3-5-2", "5-3-2", "4-5-1"];
@@ -333,6 +361,16 @@ fn cap(s: &str) -> String { let mut c = s.chars(); match c.next() { Some(f) => f
 fn gen_word(rng: &mut Rng, n: usize) -> String { (0..n).map(|_| *rng.pick(&SYL)).collect::<String>() }
 fn gen_city(rng: &mut Rng) -> String { let n = rng.range(2, 3) as usize; cap(&gen_word(rng, n)) + *rng.pick(&CITY_END) }
 fn gen_player_name(rng: &mut Rng) -> String { format!("{} {}", rng.pick(&FIRST), cap(&(gen_word(rng, 2) + *rng.pick(&["s", "ni", "lho", "ra", "to", ""])))) }
+
+pub fn fmt_money(v: i64) -> String {
+    let s = v.abs().to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() { if i > 0 && (s.len() - i) % 3 == 0 { out.push('.'); } out.push(c); }
+    format!("{}R$ {}", if v < 0 { "-" } else { "" }, out)
+}
+fn transfer_news(name: &str, from: Option<&str>, to: &str, fee: i64) -> String {
+    match from { Some(f) => format!("Mercado: {} deixa o {} e reforça o {} por {}", name, f, to, fmt_money(fee)), None => format!("Mercado: {} (livre) reforça o {}", name, to) }
+}
 
 pub fn player_value(p: &Player) -> i64 {
     let age_f = if p.age <= 23 { 1.3 } else if p.age <= 29 { 1.0 } else if p.age <= 32 { 0.7 } else { 0.4 };
@@ -374,7 +412,8 @@ impl Game {
         }
         let mut g = Game { rng, season: 1, round: 0, teams, players, schedule: vec![], managed: None,
             finance: Finance::default(), news: vec![], last_results: vec![], live: vec![], fired: false, last_round: Finance::default(),
-            expected: vec![], last_report: None, report_pending: false, history: vec![], cup: Cup::default() };
+            expected: vec![], last_report: None, report_pending: false, history: vec![], cup: Cup::default(),
+            offers: vec![], next_offer_id: 0, negotiations: vec![], auction: None, transfers: vec![], offers_unseen: false };
         g.refill_free_agents();
         for i in 0..g.players.len() { if g.players[i].team.is_some() { g.players[i].contract_until = 1 + g.rng.range(0, 3) as u32; } }
         for t in 0..g.teams.len() { for _ in 0..2 { g.gen_prospect(t); } }
@@ -1326,6 +1365,7 @@ impl Game {
     }
 
     pub fn end_season(&mut self) {
+        self.offers.clear(); self.negotiations.clear(); self.auction = None;
         let tables: Vec<Vec<usize>> = (0..DIVISIONS).map(|d| self.table(d)).collect();
         let old_div: Vec<usize> = self.teams.iter().map(|t| t.division).collect();
         let mut news = vec![format!("Fim da temporada {}!", self.season)];
@@ -1443,6 +1483,7 @@ impl Game {
         if p.academy { return Err("Jogadores da base de outros clubes não estão à venda".into()); }
         if p.retired { return Err("Jogador aposentado".into()); }
         if p.loan_from.is_some() { return Err("Jogador emprestado não pode ser negociado".into()); }
+        if p.team.is_some() && !self.window_open() { return Err("Janela de transferências fechada: só é possível contratar jogadores livres".into()); }
         if self.squad(buyer).len() >= MAX_SQUAD { return Err(format!("Elenco cheio (máx. {})", MAX_SQUAD)); }
         if let Some(seller) = p.team { if self.squad(seller).len() <= MIN_SQUAD { return Err("O clube vendedor não pode liberar mais jogadores".into()); } }
         let price = self.buy_price(id);
@@ -1453,13 +1494,227 @@ impl Game {
         if Some(buyer) == self.managed { self.finance.transfers_out += price; }
         self.players[id].morale = 65;
         self.sign(buyer, id, 3);
+        self.log_transfer(id, seller, buyer, price, if seller.is_some() { "compra" } else { "livre" });
         Ok(format!("{} contratado por R$ {}", self.players[id].name, price))
+    }
+
+    // ------------------------------------------------ mercado vivo
+    /// Janela aberta antes da rodada `self.round`?
+    pub fn window_open(&self) -> bool { self.window_info().0 }
+    /// (aberta, nome, rodadas restantes até fechar / até abrir)
+    pub fn window_info(&self) -> (bool, &'static str, usize) {
+        for &(a, b, n) in &TRANSFER_WINDOWS { if self.round >= a && self.round < b { return (true, n, b - self.round); } }
+        for &(a, _, n) in &TRANSFER_WINDOWS { if self.round < a { return (false, n, a - self.round); } }
+        (false, TRANSFER_WINDOWS[0].2, ROUNDS - self.round + 1)
+    }
+    fn log_transfer(&mut self, id: usize, from: Option<usize>, to: usize, fee: i64, kind: &str) {
+        let name = self.players[id].name.clone();
+        self.transfers.push(TransferRec { season: self.season, round: self.round, player: id, name, from, to, fee, kind: kind.into() });
+        if self.transfers.len() > 400 { self.transfers.remove(0); }
+    }
+    /// Jogador-chave: entre os 3 melhores do elenco.
+    pub fn is_key_player(&self, id: usize) -> bool {
+        let Some(t) = self.players[id].team else { return false };
+        let mut sk: Vec<i32> = self.squad(t).iter().map(|&i| self.players[i].skill).collect();
+        sk.sort_by(|a, b| b.cmp(a));
+        sk.len() > 2 && self.players[id].skill >= sk[2]
+    }
+    /// Valor mínimo que o clube dono aceita (escondido do usuário).
+    fn reserve_price(&self, id: usize) -> i64 {
+        let base = self.buy_price(id);
+        // varia por jogador de forma determinística (entre 95% e 125% do preço de tabela)
+        let h = (id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ self.season as u64;
+        let f = 95 + (h >> 33) % 31;
+        let mut r = base * f as i64 / 100;
+        if self.is_key_player(id) { r = r * 2; }
+        r
+    }
+    /// Proposta do usuário por um jogador de outro clube.
+    pub fn negotiate(&mut self, buyer: usize, id: usize, offer: i64) -> Result<serde_json::Value, String> {
+        let p = self.players.get(id).ok_or("Jogador inexistente")?;
+        let Some(owner) = p.team else { return self.buy(buyer, id).map(|m| serde_json::json!({"status": "accepted", "msg": m})) };
+        if owner == buyer { return Err("Jogador já é seu".into()); }
+        if !self.window_open() { return Err("Janela de transferências fechada: só é possível contratar jogadores livres".into()); }
+        if p.academy || p.loan_from.is_some() || p.retired { return Err("Jogador não está disponível".into()); }
+        if offer > self.teams[buyer].budget { return Err("Orçamento insuficiente para essa proposta".into()); }
+        let name = p.name.clone();
+        let club = self.teams[owner].name.clone();
+        let reserve = self.reserve_price(id);
+        let pos = self.negotiations.iter().position(|n| n.player == id);
+        let attempts = pos.map_or(0, |i| self.negotiations[i].attempts);
+        if attempts >= 3 { return Ok(serde_json::json!({"status": "closed", "msg": format!("O {} encerrou as conversas sobre {} até a próxima rodada", club, name)})); }
+        if self.is_key_player(id) && offer < reserve {
+            self.bump_negotiation(id, 0, true);
+            return Ok(serde_json::json!({"status": "refused", "msg": format!("O {} se recusa a negociar {}: é peça-chave do elenco", club, name)}));
+        }
+        if offer >= reserve {
+            self.do_transfer(buyer, id, offer)?;
+            self.negotiations.retain(|n| n.player != id);
+            return Ok(serde_json::json!({"status": "accepted", "msg": format!("Negócio fechado! {} chega do {} por {}", name, club, fmt_money(offer))}));
+        }
+        if offer * 100 >= reserve * 70 {
+            let counter = ((reserve + offer) / 2).max(reserve * 102 / 100) / 1000 * 1000;
+            self.bump_negotiation(id, counter, false);
+            return Ok(serde_json::json!({"status": "counter", "counter": counter, "msg": format!("O {} faz uma contraproposta: {} por {}", club, fmt_money(counter), name)}));
+        }
+        self.bump_negotiation(id, 0, true);
+        Ok(serde_json::json!({"status": "rejected", "msg": format!("O {} recusou a proposta de {} por {}", club, fmt_money(offer), name)}))
+    }
+    fn bump_negotiation(&mut self, id: usize, counter: i64, _fail: bool) {
+        if let Some(n) = self.negotiations.iter_mut().find(|n| n.player == id) { n.attempts += 1; if counter > 0 { n.counter = counter; } }
+        else { self.negotiations.push(Negotiation { player: id, counter, attempts: 1 }); }
+    }
+    /// Aceita a contraproposta pendente de um clube.
+    pub fn accept_counter(&mut self, buyer: usize, id: usize) -> Result<String, String> {
+        let c = self.negotiations.iter().find(|n| n.player == id && n.counter > 0).map(|n| n.counter).ok_or("Não há contraproposta para esse jogador")?;
+        if !self.window_open() { return Err("Janela de transferências fechada".into()); }
+        self.do_transfer(buyer, id, c)?;
+        self.negotiations.retain(|n| n.player != id);
+        Ok(format!("Negócio fechado: {} contratado por {}", self.players[id].name, fmt_money(c)))
+    }
+    /// Transferência por valor combinado.
+    fn do_transfer(&mut self, buyer: usize, id: usize, fee: i64) -> Result<(), String> {
+        let seller = self.players[id].team;
+        if self.squad(buyer).len() >= MAX_SQUAD { return Err(format!("Elenco cheio (máx. {})", MAX_SQUAD)); }
+        if let Some(s) = seller { if self.squad(s).len() <= MIN_SQUAD { return Err("O clube vendedor não pode liberar mais jogadores".into()); } }
+        if self.teams[buyer].budget < fee { return Err("Orçamento insuficiente".into()); }
+        self.teams[buyer].budget -= fee;
+        if let Some(s) = seller {
+            self.teams[s].budget += fee; self.teams[s].lineup.retain(|&x| x != id);
+            if Some(s) == self.managed { self.finance.transfers_in += fee; }
+        }
+        if Some(buyer) == self.managed { self.finance.transfers_out += fee; }
+        self.players[id].morale = 65;
+        self.sign(buyer, id, 3);
+        self.log_transfer(id, seller, buyer, fee, "compra");
+        Ok(())
+    }
+    /// Clubes da IA fazem propostas pelos jogadores do usuário (só com janela aberta).
+    fn ai_offers(&mut self) {
+        for o in self.offers.iter_mut() { o.rounds_left = o.rounds_left.saturating_sub(1); }
+        let expired: Vec<Offer> = self.offers.iter().filter(|o| o.rounds_left == 0).cloned().collect();
+        for o in expired { self.news.push(format!("Mercado: a proposta do {} por {} expirou", self.teams[o.club].name, self.players[o.player].name)); }
+        self.offers.retain(|o| o.rounds_left > 0 && self.players[o.player].team == self.managed);
+        let Some(m) = self.managed else { return };
+        if !self.window_open() { self.offers.clear(); return; }
+        let n = if self.rng.f64() < 0.6 { 1 } else { 0 } + if self.rng.f64() < 0.25 { 1 } else { 0 };
+        for _ in 0..n {
+            let squad: Vec<usize> = self.squad(m).into_iter().filter(|&i| self.players[i].loan_from.is_none() && !self.offers.iter().any(|o| o.player == i)).collect();
+            if squad.len() <= MIN_SQUAD || self.offers.len() >= 4 { break; }
+            let id = *self.rng.pick(&squad);
+            let value = player_value(&self.players[id]);
+            let clubs: Vec<usize> = (0..self.teams.len()).filter(|&t| t != m && self.teams[t].budget > value * 2 && self.squad(t).len() < MAX_SQUAD - 2).collect();
+            if clubs.is_empty() { continue; }
+            let club = *self.rng.pick(&clubs);
+            let amount = (value as f64 * (0.85 + self.rng.f64() * 0.45)) as i64 / 1000 * 1000;
+            let max_pay = (amount as f64 * (1.05 + self.rng.f64() * 0.3)) as i64;
+            self.next_offer_id += 1;
+            self.offers.push(Offer { id: self.next_offer_id, player: id, club, amount, max_pay, rounds_left: 3, countered: false });
+            self.offers_unseen = true;
+            self.news.push(format!("Proposta: o {} oferece {} por {}", self.teams[club].name, fmt_money(amount), self.players[id].name));
+        }
+    }
+    pub fn accept_offer(&mut self, oid: u32) -> Result<String, String> {
+        let o = self.offers.iter().find(|o| o.id == oid).cloned().ok_or("Proposta inexistente")?;
+        let m = self.managed.ok_or("Nenhum time")?;
+        if self.players[o.player].team != Some(m) { return Err("Jogador não está mais no elenco".into()); }
+        if self.squad(m).len() <= MIN_SQUAD { return Err(format!("Elenco mínimo de {} jogadores", MIN_SQUAD)); }
+        if self.teams[o.club].budget < o.amount { self.offers.retain(|x| x.id != oid); return Err("O clube comprador não tem mais o dinheiro".into()); }
+        self.teams[o.club].budget -= o.amount;
+        self.teams[m].budget += o.amount;
+        self.finance.transfers_in += o.amount;
+        self.teams[m].lineup.retain(|&x| x != o.player);
+        self.players[o.player].team = Some(o.club);
+        self.log_transfer(o.player, Some(m), o.club, o.amount, "venda");
+        self.offers.retain(|x| x.player != o.player);
+        Ok(format!("{} vendido ao {} por {}", self.players[o.player].name, self.teams[o.club].name, fmt_money(o.amount)))
+    }
+    pub fn reject_offer(&mut self, oid: u32) -> Result<String, String> {
+        let o = self.offers.iter().find(|o| o.id == oid).cloned().ok_or("Proposta inexistente")?;
+        self.offers.retain(|x| x.id != oid);
+        Ok(format!("Proposta do {} recusada", self.teams[o.club].name))
+    }
+    /// Contraproposta: o clube aceita se couber no limite dele; senão desiste. Só uma tentativa.
+    pub fn counter_offer(&mut self, oid: u32, amount: i64) -> Result<serde_json::Value, String> {
+        let o = self.offers.iter().find(|o| o.id == oid).cloned().ok_or("Proposta inexistente")?;
+        if o.countered { return Err("Você já fez uma contraproposta para esse clube".into()); }
+        if amount <= o.amount { return Err("A contraproposta deve ser maior que a oferta".into()); }
+        let club = self.teams[o.club].name.clone();
+        if amount <= o.max_pay && self.teams[o.club].budget >= amount {
+            if let Some(x) = self.offers.iter_mut().find(|x| x.id == oid) { x.amount = amount; x.countered = true; }
+            let msg = self.accept_offer(oid)?;
+            Ok(serde_json::json!({"status": "accepted", "msg": format!("O {} aceitou a contraproposta. {}", club, msg)}))
+        } else {
+            self.offers.retain(|x| x.id != oid);
+            Ok(serde_json::json!({"status": "withdrawn", "msg": format!("O {} achou caro demais e desistiu do negócio", club)}))
+        }
+    }
+    /// Leilões: um clube endividado leiloa um jogador; o usuário pode dar lance até o fim da rodada.
+    fn run_auction(&mut self) {
+        if let Some(a) = self.auction.clone() {
+            let mut a = a;
+            a.rounds_left = a.rounds_left.saturating_sub(1);
+            if a.rounds_left > 0 { self.auction = Some(a); return; }
+            self.auction = None;
+            if self.players[a.player].team != Some(a.seller) || self.squad(a.seller).len() <= MIN_SQUAD { return; }
+            // lance mais alto da IA
+            let value = player_value(&self.players[a.player]);
+            let mut ai_bid = 0; let mut ai_club = None;
+            for t in 0..self.teams.len() {
+                if Some(t) == self.managed || t == a.seller || self.squad(t).len() >= MAX_SQUAD - 1 { continue; }
+                if self.rng.f64() < 0.15 {
+                    let b = ((value as f64 * (0.7 + self.rng.f64() * 0.6)) as i64).min(self.teams[t].budget / 2) / 1000 * 1000;
+                    if b >= a.min_bid && b > ai_bid { ai_bid = b; ai_club = Some(t); }
+                }
+            }
+            let name = self.players[a.player].name.clone();
+            let seller = self.teams[a.seller].name.clone();
+            if let Some(m) = self.managed { if a.user_bid > ai_bid && a.user_bid >= a.min_bid && self.do_transfer(m, a.player, a.user_bid).is_ok() {
+                self.news.push(format!("Leilão: você arrematou {} do {} por {}", name, seller, fmt_money(a.user_bid)));
+                return;
+            } }
+            if let Some(t) = ai_club { if self.do_transfer(t, a.player, ai_bid).is_ok() {
+                self.news.push(format!("Leilão: {} (do {}) arrematado pelo {} por {}", name, seller, self.teams[t].name, fmt_money(ai_bid)));
+                return;
+            } }
+            self.news.push(format!("Leilão: ninguém cobriu o lance mínimo por {}", name));
+            return;
+        }
+        if !self.window_open() || self.rng.f64() > 0.3 { return; }
+        let poor: Vec<usize> = (0..self.teams.len()).filter(|&t| Some(t) != self.managed && self.squad(t).len() > MIN_SQUAD + 3).collect();
+        if poor.is_empty() { return; }
+        let seller = *poor.iter().min_by_key(|&&t| self.teams[t].budget - DIV_BUDGET[self.teams[t].division] / 2 + (self.rng.range(0, 1_000_000))).unwrap();
+        let cands: Vec<usize> = self.squad(seller).into_iter().filter(|&i| self.players[i].loan_from.is_none()).collect();
+        let Some(&id) = cands.iter().max_by_key(|&&i| self.players[i].skill) else { return };
+        let min_bid = player_value(&self.players[id]) * 6 / 10 / 1000 * 1000;
+        self.auction = Some(Auction { player: id, seller, min_bid, user_bid: 0, rounds_left: 1 });
+        self.news.push(format!("Leilão: o {} leiloa {} — lance mínimo {}", self.teams[seller].name, self.players[id].name, fmt_money(min_bid)));
+    }
+    pub fn bid_auction(&mut self, amount: i64) -> Result<String, String> {
+        let m = self.managed.ok_or("Nenhum time")?;
+        let a = self.auction.as_mut().ok_or("Não há leilão em andamento")?;
+        if amount < a.min_bid { return Err(format!("O lance mínimo é {}", fmt_money(a.min_bid))); }
+        if amount > self.teams[m].budget { return Err("Orçamento insuficiente".into()); }
+        if amount <= a.user_bid { return Err("O novo lance deve ser maior que o anterior".into()); }
+        a.user_bid = amount;
+        Ok(format!("Lance de {} registrado — o resultado sai após a rodada", fmt_money(amount)))
+    }
+    pub fn market_state_json(&self) -> serde_json::Value {
+        let (open, name, left) = self.window_info();
+        let pj = |id: usize| self.player_json(&self.players[id]);
+        serde_json::json!({"open": open, "name": name, "roundsLeft": left, "unseen": self.offers_unseen,
+            "offers": self.offers.iter().map(|o| serde_json::json!({"id": o.id, "player": pj(o.player), "club": o.club, "clubName": self.teams[o.club].name, "amount": o.amount, "roundsLeft": o.rounds_left, "countered": o.countered})).collect::<Vec<_>>(),
+            "negotiations": self.negotiations.iter().filter(|n| n.counter > 0).map(|n| serde_json::json!({"player": pj(n.player), "counter": n.counter, "attempts": n.attempts})).collect::<Vec<_>>(),
+            "auction": self.auction.as_ref().map(|a| serde_json::json!({"player": pj(a.player), "seller": a.seller, "sellerName": self.teams[a.seller].name, "minBid": a.min_bid, "userBid": a.user_bid})),
+            "transfers": self.transfers.iter().rev().take(30).map(|t| serde_json::json!({"season": t.season, "round": t.round, "name": t.name, "player": t.player,
+                "from": t.from, "fromName": t.from.map(|f| self.teams[f].name.clone()).unwrap_or("Sem clube".into()), "to": t.to, "toName": self.teams[t.to].name, "fee": t.fee, "kind": t.kind})).collect::<Vec<_>>()})
     }
 
     pub fn sell(&mut self, seller: usize, id: usize) -> Result<String, String> {
         if self.players.get(id).map(|p| p.team == Some(seller) && !p.academy) != Some(true) { return Err("Jogador não é do seu elenco".into()); }
         if self.players[id].loan_from.is_some() { return Err("Jogador emprestado não pode ser vendido".into()); }
         if self.squad(seller).len() <= MIN_SQUAD { return Err(format!("Elenco mínimo de {} jogadores", MIN_SQUAD)); }
+        if !self.window_open() { return Err("Janela de transferências fechada".into()); }
         let price = self.sell_price(id);
         let cands: Vec<usize> = (0..self.teams.len()).filter(|&t| t != seller && self.teams[t].budget >= price && self.squad(t).len() < MAX_SQUAD).collect();
         if cands.is_empty() { return Err("Nenhum clube tem dinheiro para essa compra".into()); }
@@ -1469,6 +1724,7 @@ impl Game {
         self.teams[seller].lineup.retain(|&x| x != id);
         if Some(seller) == self.managed { self.finance.transfers_in += price; }
         self.players[id].team = Some(buyer);
+        self.log_transfer(id, Some(seller), buyer, price, "venda");
         Ok(format!("{} vendido ao {} por R$ {}", self.players[id].name, self.teams[buyer].name, price))
     }
 
@@ -1488,6 +1744,9 @@ impl Game {
                 self.sign(t, id, 2);
             }
         }
+        self.negotiations.clear();
+        self.ai_offers();
+        self.run_auction();
 
         // clubes ricos investem em reforços (faz o dinheiro circular entre as divisões)
         for t in 0..self.teams.len() {
@@ -1502,7 +1761,8 @@ impl Game {
                 && p.skill > median && p.age <= 30 && p.team.map_or(true, |o| self.squad(o).len() > MIN_SQUAD + 2))
                 .map(|p| p.id).filter(|&id| self.buy_price(id) <= budget).max_by_key(|&id| self.players[id].skill);
             if let Some(id) = target {
-                if self.buy(t, id).is_ok() { self.news.push(format!("Mercado: {} reforça o {}", self.players[id].name, self.teams[t].name)); }
+                let from = self.players[id].team; let price = self.buy_price(id);
+                if self.buy(t, id).is_ok() { self.news.push(transfer_news(&self.players[id].name, from.map(|f| self.teams[f].name.as_str()), &self.teams[t].name, price)); }
             }
         }
         if self.rng.f64() < 0.5 {
@@ -1510,8 +1770,9 @@ impl Game {
 
             if Some(t) != self.managed && self.squad(t).len() < 24 {
                 let id = self.rng.range(0, self.players.len() as i64 - 1) as usize;
-                if self.players[id].team != self.managed && self.players[id].team.is_some() && self.buy(t, id).is_ok() {
-                    self.news.push(format!("Mercado: {} reforça o {}", self.players[id].name, self.teams[t].name));
+                let from = self.players[id].team; let price = self.buy_price(id);
+                if from != self.managed && from.is_some() && self.buy(t, id).is_ok() {
+                    self.news.push(transfer_news(&self.players[id].name, from.map(|f| self.teams[f].name.as_str()), &self.teams[t].name, price));
                 }
             }
         }
@@ -1694,7 +1955,7 @@ impl Game {
             "fired": self.fired, "jobOffers": self.job_offers().iter().map(|&t| serde_json::json!({"id": t, "name": self.teams[t].name, "division": self.teams[t].division, "budget": self.teams[t].budget})).collect::<Vec<_>>(),
             "managed": managed, "teams": teams, "news": self.news, "formations": FORMATIONS,
             "reportPending": self.report_pending, "report": self.last_report, "history": self.history,
-            "dayType": if cup_day { "cup" } else { "league" }, "cupRoundName": CUP_ROUND_NAMES[self.cup.round.min(CUP_ROUNDS - 1)], "cup": self.cup_json(),
+            "market": self.market_state_json(), "dayType": if cup_day { "cup" } else { "league" }, "cupRoundName": CUP_ROUND_NAMES[self.cup.round.min(CUP_ROUNDS - 1)], "cup": self.cup_json(),
             "expected": self.managed.and_then(|m| self.expected.get(m).copied()), "promoted": PROMOTED, "teamsPerDiv": TEAMS_PER_DIV,
             "scorers": scorers.iter().take(15).map(|p| self.player_json(p)).collect::<Vec<_>>()})
     }
@@ -1824,6 +2085,17 @@ impl FutManager {
     pub fn ack_report(&mut self) { self.g.report_pending = false; }
     /// O usuário viu o sorteio da Copa.
     pub fn ack_cup_draw(&mut self) { self.g.cup.draw_pending = false; }
+    pub fn ack_offers(&mut self) { self.g.offers_unseen = false; }
+    pub fn negotiate(&mut self, id: usize, offer: f64) -> String {
+        match self.g.managed { Some(m) => match self.g.negotiate(m, id, offer as i64) { Ok(v) => serde_json::json!({"ok": v["status"] == "accepted", "status": v["status"], "msg": v["msg"], "counter": v["counter"]}).to_string(), Err(e) => res(Err(e)) }, None => res(Err("Nenhum time".into())) }
+    }
+    pub fn accept_counter(&mut self, id: usize) -> String { match self.g.managed { Some(m) => res(self.g.accept_counter(m, id)), None => res(Err("Nenhum time".into())) } }
+    pub fn accept_offer(&mut self, oid: u32) -> String { res(self.g.accept_offer(oid)) }
+    pub fn reject_offer(&mut self, oid: u32) -> String { res(self.g.reject_offer(oid)) }
+    pub fn counter_offer(&mut self, oid: u32, amount: f64) -> String {
+        match self.g.counter_offer(oid, amount as i64) { Ok(v) => serde_json::json!({"ok": v["status"] == "accepted", "status": v["status"], "msg": v["msg"]}).to_string(), Err(e) => res(Err(e)) }
+    }
+    pub fn bid_auction(&mut self, amount: f64) -> String { res(self.g.bid_auction(amount as i64)) }
 
     /// Ficha de qualquer clube (somente leitura).
     pub fn team(&self, id: usize) -> String {
@@ -1850,6 +2122,7 @@ impl FutManager {
         self.g.fired = false;
         self.g.teams[team].debt_rounds = 0;
         self.g.finance = Finance::default();
+        self.g.offers.clear(); self.g.negotiations.clear();
         self.g.managed = Some(team);
         res(Ok(format!("Você assumiu o {}", self.g.teams[team].name)))
     }
@@ -2786,5 +3059,71 @@ mod copa {
         assert!(kicks.len() >= 6);
         for (i, k) in kicks.iter().enumerate() { assert_eq!(k.side as usize, i % 2, "cobranças alternadas"); }
         assert_eq!(kicks.iter().filter(|e| e.kind == "disputa_gol").count() as u32, a + b);
+    }
+
+    mod mercado {
+        use super::super::*;
+        fn g() -> Game { let mut g = Game::new(777); g.managed = Some(5); g }
+        #[test]
+        fn window_gates_purchases() {
+            let mut g = g();
+            assert!(g.window_open());
+            while g.window_open() { g.play_round(); }
+            let target = g.players.iter().find(|p| p.team.is_some() && p.team != Some(5) && !p.academy && p.loan_from.is_none()).unwrap().id;
+            g.teams[5].budget = 1_000_000_000;
+            assert!(g.buy(5, target).unwrap_err().contains("fechada"));
+            assert!(g.negotiate(5, target, 1).is_err());
+            let free = g.free_agents()[0];
+            assert!(g.buy(5, free).is_ok());
+            let (open, _, left) = g.window_info();
+            assert!(!open && left > 0);
+        }
+        #[test]
+        fn negotiation_counter_and_key_players() {
+            let mut g = g();
+            g.teams[5].budget = 1_000_000_000;
+            // jogador comum de outro clube
+            let other = 20;
+            let squad = g.squad(other);
+            let common = *squad.iter().find(|&&i| !g.is_key_player(i)).unwrap();
+            let key = *squad.iter().find(|&&i| g.is_key_player(i)).unwrap();
+            let low = g.negotiate(5, common, g.buy_price(common) / 10).unwrap();
+            assert_eq!(low["status"], "rejected");
+            let mid = g.negotiate(5, common, g.reserve_price(common) * 85 / 100).unwrap();
+            assert_eq!(mid["status"], "counter");
+            assert!(g.accept_counter(5, common).is_ok());
+            assert_eq!(g.players[common].team, Some(5));
+            let r = g.negotiate(5, key, g.buy_price(key)).unwrap();
+            assert_eq!(r["status"], "refused");
+            assert_eq!(g.transfers.last().unwrap().player, common);
+        }
+        #[test]
+        fn ai_offers_and_auctions_happen() {
+            let mut g = g();
+            let mut offers = 0; let mut auctions = 0; let mut sold = false;
+            for _ in 0..4 {
+                g.play_round();
+                offers += g.offers.len(); if g.auction.is_some() { auctions += 1; }
+                if let Some(o) = g.offers.first().cloned() { if !sold { let b = g.teams[5].budget; g.accept_offer(o.id).unwrap(); assert!(g.teams[5].budget > b); sold = true; } }
+            }
+            assert!(offers > 0, "nenhuma proposta");
+            // várias temporadas: leilões ocorrem e transferências IA-IA são registradas
+            for _ in 0..(ROUNDS * 2) { g.play_round(); if g.auction.is_some() { auctions += 1; } }
+            assert!(auctions > 0, "nenhum leilão");
+            assert!(g.transfers.iter().any(|t| t.from.is_some() && t.to != 5 && t.from != Some(5)));
+            assert!(g.offers.iter().all(|_| g.window_open()));
+        }
+        #[test]
+        fn counter_offer_resolves() {
+            let mut g = g();
+            let mut done = false;
+            for _ in 0..4 { g.play_round(); if let Some(o) = g.offers.first().cloned() {
+                let v = g.counter_offer(o.id, o.amount * 2).unwrap();
+                assert_eq!(v["status"], "withdrawn");
+                assert!(g.offers.iter().all(|x| x.id != o.id));
+                done = true; break;
+            } }
+            assert!(done);
+        }
     }
 }

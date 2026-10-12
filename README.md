@@ -119,3 +119,7 @@ MIT
 ## Copa Nacional
 
 Mata-mata com os 64 clubes em 6 fases (datas no meio da semana entre rodadas). Jogo único, prorrogação e disputa de pênaltis cobrança a cobrança (ao vivo, com sons, no jogo do seu clube). O clube de divisão inferior joga em casa. Sorteio exibido na janela 'Sorteio', chaveamento na aba 'Copa', premiação por fase alcançada e campeão no encerramento e no Histórico. Demonstração: `www/?copa`.
+
+## Mercado mais vivo
+
+Janelas de transferência na pré-temporada (rodadas 1–4) e no meio da temporada (rodadas 15–18), com contagem regressiva na barra de status; fora delas só jogadores sem clube. Clubes da IA fazem propostas pelos seus jogadores (aceitar, recusar ou contrapropor). Comprar de outro clube exige negociação: contrapropostas, e peças-chave podem não estar à venda. Leilões ocasionais de clubes endividados e transferências entre clubes da IA registradas. Demonstração: `www/?mercado`.

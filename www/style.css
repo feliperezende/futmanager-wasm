@@ -215,3 +215,12 @@ tr.goal-flash td{animation:goalflash 1.6s ease-out}
 .ticker .prorrogacao,.ticker .disputa_inicio,.ticker .disputa_fim{color:#ff0;font-weight:bold}.ticker .disputa_gol{color:#7f7}.ticker .disputa_perdido{color:#f88}
 .daytag{background:#a00;color:#fff;padding:0 4px;font-size:12px;vertical-align:middle}
 .cupchamp{padding:4px 6px;border:2px groove #fff;background:#fff6c8}.cupchamp.mine{background:#ffd54a}
+/* Mercado */
+.mkbanner { margin: 6px 0; padding: 4px 8px; border: 2px inset #fff; background: #fff; }
+.mkbanner.open { background: #e8ffe8; } .mkbanner.closed { background: #fff0f0; }
+.mkbtns { margin: 4px 0; }
+.auction { background: #fffbe0; margin: 6px 0; }
+.negrow { margin: 8px 0; } .negrow input { width: 130px; }
+.negmsg { padding: 6px; border: 2px inset #fff; background: #fff; min-height: 2.5em; }
+.negmsg.accepted { background: #e8ffe8; } .negmsg.counter { background: #fffbe0; } .negmsg.refused, .negmsg.rejected, .negmsg.closed { background: #fff0f0; }
+.nowrap { white-space: nowrap; }
