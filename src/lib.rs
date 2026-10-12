@@ -260,6 +260,18 @@ pub struct Game {
     /// Receitas/despesas do clube gerenciado na última rodada
     #[serde(default)]
     pub last_round: Finance,
+    /// Posição esperada (ranking de força) de cada time na sua divisão no início da temporada
+    #[serde(default)]
+    pub expected: Vec<usize>,
+    /// Relatório da última temporada encerrada (encerramento)
+    #[serde(default)]
+    pub last_report: Option<serde_json::Value>,
+    /// O encerramento ainda não foi visto pelo usuário
+    #[serde(default)]
+    pub report_pending: bool,
+    /// Galeria de campeões e temporadas do usuário
+    #[serde(default)]
+    pub history: Vec<serde_json::Value>,
 }
 
 pub const FORMATIONS: [&str; 5] = ["4-4-2", "4-3-3", "3-5-2", "5-3-2", "4-5-1"];
@@ -321,12 +333,14 @@ impl Game {
             }
         }
         let mut g = Game { rng, season: 1, round: 0, teams, players, schedule: vec![], managed: None,
-            finance: Finance::default(), news: vec![], last_results: vec![], live: vec![], fired: false, last_round: Finance::default() };
+            finance: Finance::default(), news: vec![], last_results: vec![], live: vec![], fired: false, last_round: Finance::default(),
+            expected: vec![], last_report: None, report_pending: false, history: vec![] };
         g.refill_free_agents();
         for i in 0..g.players.len() { if g.players[i].team.is_some() { g.players[i].contract_until = 1 + g.rng.range(0, 3) as u32; } }
         for t in 0..g.teams.len() { for _ in 0..2 { g.gen_prospect(t); } }
         g.build_schedule();
         for t in 0..g.teams.len() { g.auto_lineup(t); }
+        g.compute_expected();
         g
     }
 
@@ -1019,12 +1033,91 @@ impl Game {
         }
     }
 
+    /// Ranking de força dentro de cada divisão (1 = favorito).
+    pub fn compute_expected(&mut self) {
+        let mut exp = vec![0; self.teams.len()];
+        for d in 0..DIVISIONS {
+            let mut v: Vec<(usize, f64)> = self.division_teams(d).iter().map(|&t| { let (a, b) = self.strength(t); (t, a + b) }).collect();
+            v.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal).then(x.0.cmp(&y.0)));
+            for (i, (t, _)) in v.iter().enumerate() { exp[*t] = i + 1; }
+        }
+        self.expected = exp;
+    }
+
+    /// Monta o relatório de encerramento com os dados ainda intactos da temporada.
+    fn build_report(&self, tables: &[Vec<usize>]) -> serde_json::Value {
+        use serde_json::json;
+        let pj = |id: usize| { let p = &self.players[id]; json!({"id": id, "name": p.name, "pos": p.pos.label(), "age": p.age, "skill": p.skill, "goals": p.goals,
+            "team": p.team.map(|t| self.teams[t].name.clone()).unwrap_or("Sem clube".into())}) };
+        let score = |id: usize| self.players[id].skill * 10 + self.players[id].goals * 20;
+        let active: Vec<usize> = self.players.iter().filter(|p| p.team.is_some() && !p.academy && !p.retired).map(|p| p.id).collect();
+        let exp = |t: usize| self.expected.get(t).copied().filter(|&e| e > 0).unwrap_or(TEAMS_PER_DIV / 2);
+        let divisions: Vec<_> = (0..DIVISIONS).map(|d| {
+            let tb = &tables[d];
+            let row = |t: usize| { let s = &self.teams[t].stats; json!({"id": t, "name": self.teams[t].name, "pts": s.pts, "w": s.w, "d": s.d, "l": s.l, "gf": s.gf, "ga": s.ga, "p": s.p}) };
+            let top: Vec<usize> = active.iter().copied().filter(|&id| self.players[id].team.map(|t| self.teams[t].division) == Some(d)).collect();
+            let scorer = top.iter().copied().max_by_key(|&id| (self.players[id].goals, self.players[id].skill, std::cmp::Reverse(id)));
+            json!({"division": d, "champion": row(tb[0]), "runnerUp": row(tb[1]),
+                "promoted": if d > 0 { tb[..PROMOTED].iter().map(|&t| row(t)).collect::<Vec<_>>() } else { vec![] },
+                "relegated": if d + 1 < DIVISIONS { tb[TEAMS_PER_DIV - PROMOTED..].iter().map(|&t| row(t)).collect::<Vec<_>>() } else { vec![] },
+                "table": tb.iter().map(|&t| row(t)).collect::<Vec<_>>(),
+                "topScorer": scorer.map(pj)})
+        }).collect();
+        let user_div = self.managed.map(|m| self.teams[m].division).unwrap_or(0);
+        let by = |v: &mut Vec<usize>| v.sort_by_key(|&id| (std::cmp::Reverse(score(id)), id));
+        let mut all = active.clone(); by(&mut all);
+        let top_scorer = active.iter().copied().max_by_key(|&id| (self.players[id].goals, self.players[id].skill, std::cmp::Reverse(id)));
+        // melhor jogador: preferência para a elite (divisão 1)
+        let best = all.iter().copied().filter(|&id| self.players[id].team.map(|t| self.teams[t].division) == Some(0)).next().or(all.first().copied());
+        let revelation = all.iter().copied().find(|&id| self.players[id].age <= 21);
+        let mut xi = vec![];
+        for (pos, n) in [(Pos::G, 1), (Pos::D, 4), (Pos::M, 4), (Pos::A, 2)] {
+            xi.extend(all.iter().copied().filter(|&id| self.players[id].pos == pos && self.players[id].team.map(|t| self.teams[t].division) == Some(user_div)).take(n).map(pj));
+        }
+        let mut best_mgr: Option<(i64, usize, usize)> = None;
+        for d in 0..DIVISIONS { for (i, &t) in tables[d].iter().enumerate() {
+            let over = exp(t) as i64 - (i + 1) as i64 + if i == 0 { 2 } else { 0 } + if d == 0 { 1 } else { 0 };
+            if best_mgr.map_or(true, |b| over > b.0) { best_mgr = Some((over, t, i + 1)); }
+        } }
+        let manager = best_mgr.map(|(over, t, pos)| json!({"team": self.teams[t].name, "you": Some(t) == self.managed, "position": pos, "expected": exp(t), "over": over,
+            "division": self.teams[t].division}));
+        let user = self.managed.map(|m| {
+            let d = self.teams[m].division;
+            let pos = tables[d].iter().position(|&t| t == m).unwrap() + 1;
+            let s = &self.teams[m].stats;
+            let promoted = d > 0 && pos <= PROMOTED;
+            let relegated = d + 1 < DIVISIONS && pos > TEAMS_PER_DIV - PROMOTED;
+            let champion = pos == 1;
+            let diff = exp(m) as f64 - pos as f64;
+            let f = &self.finance;
+            let fin_adj = if self.teams[m].budget < 0 { -2.0 } else if self.teams[m].budget > DIV_BUDGET[d] { 0.5 } else { 0.0 };
+            let grade = (6.0 + diff * 0.6 + if promoted || (champion && d == 0) { 2.0 } else { 0.0 } - if relegated { 3.0 } else { 0.0 } + fin_adj).clamp(0.0, 10.0);
+            let grade = (grade * 10.0).round() / 10.0;
+            let (mood, text) = if grade >= 8.0 { ("eufórica", "A diretoria está eufórica! A torcida canta seu nome e o conselho já fala em renovação.") }
+                else if grade >= 5.5 { ("satisfeita", "A diretoria está satisfeita com o trabalho e confia no planejamento para a próxima temporada.") }
+                else if grade >= 3.5 { ("preocupada", "A diretoria está preocupada. Os resultados ficaram abaixo do esperado e a cobrança vai aumentar.") }
+                else { ("furiosa", "A diretoria está furiosa. A permanência no cargo depende de uma reação imediata.") };
+            let security = if grade >= 8.0 { "Total" } else if grade >= 5.5 { "Estável" } else if grade >= 3.5 { "Ameaçado" } else { "Por um fio" };
+            let fate = if champion && d == 0 { "champion" } else if champion { "champion_up" } else if promoted { "promoted" } else if relegated { "relegated" } else { "stay" };
+            json!({"team": self.teams[m].name, "id": m, "division": d, "position": pos, "expected": exp(m), "p": s.p, "w": s.w, "d": s.d, "l": s.l,
+                "gf": s.gf, "ga": s.ga, "pts": s.pts, "deducted": s.deducted, "champion": champion, "promoted": promoted, "relegated": relegated, "fate": fate,
+                "finance": f, "budget": self.teams[m].budget, "bankDebt": self.teams[m].bank_debt, "grade": grade, "mood": mood, "boardText": text, "security": security,
+                "topScorer": self.squad(m).into_iter().filter(|&id| self.players[id].goals > 0).max_by_key(|&id| (self.players[id].goals, std::cmp::Reverse(id))).map(pj)})
+        });
+        json!({"season": self.season, "divisions": divisions, "awards": {"topScorer": top_scorer.map(pj), "bestPlayer": best.map(pj),
+            "revelation": revelation.map(pj), "teamOfSeason": xi, "teamOfSeasonDivision": user_div, "bestManager": manager}, "user": user})
+    }
+
     pub fn end_season(&mut self) {
         let tables: Vec<Vec<usize>> = (0..DIVISIONS).map(|d| self.table(d)).collect();
         let old_div: Vec<usize> = self.teams.iter().map(|t| t.division).collect();
         let mut news = vec![format!("Fim da temporada {}!", self.season)];
+        let mut report = self.build_report(&tables);
+        let mut retired_names: Vec<String> = vec![];
+        let news_before = news.len();
         self.return_loans(&mut news);
         self.expire_contracts(&mut news);
+        let expired: Vec<String> = news[news_before..].iter().filter_map(|n| n.strip_prefix("Contrato encerrado: ").map(|s| s.trim_end_matches(" deixa o clube").to_string())).collect();
         for d in 0..DIVISIONS {
             news.push(format!("Campeão da Divisão {}: {}", d + 1, self.teams[tables[d][0]].name));
             for (pos, &t) in tables[d].iter().enumerate() {
@@ -1033,6 +1126,11 @@ impl Game {
                 if Some(t) == self.managed { self.finance.prizes += prize; }
             }
         }
+        if let Some(m) = self.managed {
+            report["user"]["finance"] = serde_json::to_value(&self.finance).unwrap();
+            report["user"]["budget"] = serde_json::json!(self.teams[m].budget);
+        }
+
         for d in 0..DIVISIONS - 1 {
             for i in 0..PROMOTED {
                 let down = tables[d][TEAMS_PER_DIV - 1 - i];
@@ -1060,6 +1158,7 @@ impl Game {
                 let team = self.players[i].team.unwrap();
                 let pos = self.players[i].pos;
                 news.push(format!("{} se aposenta.", self.players[i].name));
+                if Some(team) == self.managed { retired_names.push(format!("{} ({} anos)", self.players[i].name, self.players[i].age)); }
                 let base = DIV_BASE_SKILL[self.teams[team].division] - 8;
                 let mut np = Self::gen_player(&mut self.rng, i, pos, base, Some(team));
                 np.age = 18;
@@ -1086,6 +1185,24 @@ impl Game {
         self.build_schedule();
         for t in 0..self.teams.len() { self.auto_lineup(t); }
         self.news = news;
+        self.compute_expected();
+        if let Some(m) = self.managed {
+            let s = self.season;
+            let expiring: Vec<String> = self.squad(m).iter().filter(|&&id| self.players[id].contract_until <= s && self.players[id].loan_from.is_none())
+                .map(|&id| format!("{} ({}, {})", self.players[id].name, self.players[id].pos.label(), self.players[id].skill)).collect();
+            let prize = report["user"]["finance"]["prizes"].clone();
+            report["next"] = serde_json::json!({"season": s, "division": self.teams[m].division, "budget": self.teams[m].budget, "prize": prize,
+                "expected": self.expected[m], "retirements": retired_names, "expiredContracts": expired, "expiringContracts": expiring,
+                "ticketPrice": self.teams[m].ticket_price, "wageBill": self.squad(m).iter().map(|&id| self.players[id].salary).sum::<i64>()});
+        }
+        let u = &report["user"];
+        self.history.push(serde_json::json!({"season": report["season"],
+            "champions": report["divisions"].as_array().map(|v| v.iter().map(|d| d["champion"]["name"].clone()).collect::<Vec<_>>()).unwrap_or_default(),
+            "team": u["team"], "division": u["division"], "position": u["position"], "expected": u["expected"], "pts": u["pts"], "grade": u["grade"], "fate": u["fate"],
+            "topScorer": report["awards"]["topScorer"]["name"]}));
+        if self.history.len() > 200 { self.history.remove(0); }
+        self.last_report = Some(report);
+        self.report_pending = self.managed.is_some();
     }
 
     pub fn buy_price(&self, id: usize) -> i64 { let v = player_value(&self.players[id]); if self.players[id].team.is_none() { v / 5 } else { v * 11 / 10 } }
@@ -1247,6 +1364,7 @@ impl Game {
         for p in self.players.iter_mut() { if p.attrs == Attrs::default() { p.attrs = Attrs::generate(&mut rng, p.pos, p.skill); } }
         // saves antigos: jogadores esgotados (0%) recebem uma recuperação imediata
         for p in self.players.iter_mut() { if p.condition < 60 { p.condition = recover(p.condition as f64, p.attrs.stamina); } }
+        if self.expected.len() != self.teams.len() { self.compute_expected(); }
     }
 
     // ------------------------------------------------ JSON para a interface
@@ -1302,6 +1420,8 @@ impl Game {
         serde_json::json!({"season": self.season, "round": self.round, "rounds": ROUNDS, "tables": tables, "next": next, "liveActive": !self.live.is_empty(),
             "fired": self.fired, "jobOffers": self.job_offers().iter().map(|&t| serde_json::json!({"id": t, "name": self.teams[t].name, "division": self.teams[t].division, "budget": self.teams[t].budget})).collect::<Vec<_>>(),
             "managed": managed, "teams": teams, "news": self.news, "formations": FORMATIONS,
+            "reportPending": self.report_pending, "report": self.last_report, "history": self.history,
+            "expected": self.managed.and_then(|m| self.expected.get(m).copied()), "promoted": PROMOTED, "teamsPerDiv": TEAMS_PER_DIV,
             "scorers": scorers.iter().take(15).map(|p| self.player_json(p)).collect::<Vec<_>>()})
     }
 
@@ -1424,6 +1544,9 @@ impl FutManager {
     }
     pub fn save(&self) -> String { serde_json::to_string(&self.g).unwrap() }
     pub fn state(&self) -> String { self.g.state_json().to_string() }
+    /// O usuário viu o encerramento da temporada.
+    pub fn ack_report(&mut self) { self.g.report_pending = false; }
+
     /// Resumo para a lista de saves (clube, temporada, rodada, caixa).
     pub fn summary(&self) -> String { self.g.summary_json().to_string() }
     pub fn choose_team(&mut self, team: usize) -> String {
@@ -2094,7 +2217,44 @@ mod tests {
     }
 
     #[test]
+    fn season_report_and_history() {
+        let mut g = Game::new(77);
+        g.managed = Some(20);
+        assert_eq!(g.expected.len(), g.teams.len());
+        let champ_expected = { for _ in 0..ROUNDS - 1 { g.play_round(); } assert!(g.last_report.is_none()); g.table(1)[0] };
+        g.play_round();
+        assert_eq!(g.season, 2);
+        assert!(g.report_pending);
+        let r = g.last_report.clone().unwrap();
+        assert_eq!(r["season"], 1);
+        assert_eq!(r["divisions"].as_array().unwrap().len(), DIVISIONS);
+        let _ = champ_expected;
+        assert_eq!(r["divisions"][0]["promoted"].as_array().unwrap().len(), 0);
+        assert_eq!(r["divisions"][1]["promoted"].as_array().unwrap().len(), PROMOTED);
+        assert_eq!(r["divisions"][3]["relegated"].as_array().unwrap().len(), 0);
+        assert_eq!(r["awards"]["teamOfSeason"].as_array().unwrap().len(), 11);
+        assert!(r["awards"]["topScorer"]["goals"].as_i64().unwrap() > 0);
+        assert!(r["awards"]["revelation"]["age"].as_i64().unwrap() <= 21);
+        let u = &r["user"];
+        assert_eq!(u["p"], ROUNDS as i64);
+        assert_eq!(u["w"].as_i64().unwrap() + u["d"].as_i64().unwrap() + u["l"].as_i64().unwrap(), ROUNDS as i64);
+        let gr = u["grade"].as_f64().unwrap(); assert!((0.0..=10.0).contains(&gr));
+        assert!(u["finance"]["prizes"].as_i64().unwrap() > 0);
+        assert_eq!(r["next"]["prize"], u["finance"]["prizes"]);
+        assert_eq!(r["next"]["division"].as_u64().unwrap() as usize, g.teams[20].division);
+        assert_eq!(g.history.len(), 1);
+        assert_eq!(g.history[0]["champions"].as_array().unwrap().len(), DIVISIONS);
+        // persistência no save
+        let s = serde_json::to_string(&g).unwrap();
+        let g2: Game = serde_json::from_str(&s).unwrap();
+        assert!(g2.report_pending && g2.history.len() == 1);
+        let st = g.state_json();
+        assert_eq!(st["reportPending"], true);
+    }
+
+    #[test]
     fn same_xi_all_season_keeps_fitness() {
+
         for (tactic, pressing, floor, avg_min, avg_max) in [("equilibrada", false, 60, 75.0, 92.0), ("ofensiva", true, 40, 60.0, 90.0)] {
             let mut g = Game::new(141);
             let t = 0;

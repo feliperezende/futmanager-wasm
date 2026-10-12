@@ -84,3 +84,36 @@ label{white-space:nowrap}
 [data-stad]{min-width:300px;text-align:left;display:block;margin:2px 0}
 #bankAmt,#tprice,#mmax{width:130px}
 @media (max-width:640px){[data-stad]{min-width:0;width:100%}}
+
+/* ---- Fim de temporada / tabela ao vivo / histórico ---- */
+.livetable{margin-bottom:6px}.livetable table{width:100%}
+.livetable .up,.finale-body .up{color:#060;font-weight:bold}.livetable .down,.finale-body .down{color:#a00;font-weight:bold}
+.livetable .legend{font-size:11px;margin-top:3px}
+tr.z-champ td:first-child,span.z-champ{color:#b38f00;font-weight:bold}tr.z-champ{background:#fff6c8}
+tr.z-up{background:#dff3df}span.z-up{color:#060}tr.z-down{background:#f8dcdc}span.z-down{color:#a00}
+tr.decisive td{box-shadow:inset 0 0 0 1px #c80}tr.decisive td:nth-child(2)::before{content:'⚡ '}
+.finale-win{position:relative;width:760px;overflow:hidden}
+.finale-body{max-height:62vh;overflow:auto;min-height:280px}
+.finale-nav{display:flex;gap:6px;align-items:center;padding:6px;border-top:1px solid #808080}
+.finale-nav .dots{flex:1;font-size:11px}.finale-nav .dots .on{color:#000080}.finale-nav .dots span:not(.on){color:#aaa}
+.champ-hero{display:flex;gap:16px;align-items:center;padding:8px;margin-bottom:8px;border:2px groove #fff;background:linear-gradient(#fffbe6,#f0e2a0)}
+.champ-hero.mine{background:linear-gradient(#fff3b0,#ffd54a)}
+.champ-name{font-size:26px;font-weight:bold;color:#000080;text-shadow:1px 1px #fff}
+.trophy{flex:none;animation:shine 2.5s ease-in-out infinite}
+@keyframes shine{50%{filter:drop-shadow(0 0 8px #ffe680) brightness(1.15)}}
+.party{font-size:18px;font-weight:bold;color:#a00;animation:pulse 1s infinite}
+@keyframes pulse{50%{transform:scale(1.06)}}
+.fate{font-size:15px;padding:8px;border:2px groove #fff}
+.fate-champion,.fate-champion_up,.fate-promoted{background:#e3f7e3;color:#060;font-weight:bold}
+.fate-relegated{background:#3a3a46;color:#eee;font-style:italic}.fate-stay{background:#eef}
+.me-inline{background:#000080;color:#fff;padding:0 3px}
+.awards td:first-child{white-space:nowrap;font-weight:bold}
+.pitch{background:repeating-linear-gradient(#3c8d3c 0 28px,#358035 28px 56px);padding:6px;border:2px solid #fff;display:flex;flex-direction:column;gap:6px}
+.xi-line{display:flex;justify-content:space-around;gap:4px}
+.xi-p{background:#fff;border:1px solid #000;padding:2px 4px;font-size:11px;text-align:center;min-width:80px}.xi-p small{display:block;color:#555;font-size:9px}
+.board{display:flex;gap:14px;align-items:center}.board .grade{font-size:40px;font-weight:bold;min-width:90px;text-align:center}.board .grade small{font-size:14px}
+.meter{height:12px;border:2px inset #fff;background:#fff;width:260px}.meter div{height:100%}
+.confetti{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.confetti i{position:absolute;top:-12px;width:7px;height:11px;animation:fall linear forwards}
+@keyframes fall{to{top:110%;transform:rotate(720deg) translateX(40px)}}
+@media (max-width:640px){.finale-win{width:96vw}.champ-hero{flex-direction:column;text-align:center}.champ-name{font-size:20px}.board{flex-direction:column}.meter{width:100%}.finale-nav{flex-wrap:wrap}.xi-p{min-width:0}}

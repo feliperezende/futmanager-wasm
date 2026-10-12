@@ -1,4 +1,5 @@
 import init, { FutManager } from '../pkg/futmanager.js';
+import { openFinale, finaleOpen, renderLiveTable, renderHistory, isFinalStretch, chime } from './finale.js';
 
 const SAVE_KEY = 'futmanager98_save'; // formato antigo (slot único)
 const SLOTS = 5;
@@ -248,7 +249,13 @@ function render() {
   document.querySelectorAll('.tab').forEach((s) => s.classList.add('hidden'));
   document.querySelectorAll('.menubar [data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
   $('#tab-' + tab).classList.remove('hidden');
-  ({ clube: renderClub, jogos: renderRound, tabela: renderTable, mercado: renderMarket, base: renderAcademy, financas: renderFinance })[tab]();
+  ({ clube: renderClub, jogos: renderRound, tabela: renderTable, mercado: renderMarket, base: renderAcademy, financas: renderFinance, historico: renderHistoryTab })[tab]();
+  if (st.reportPending && !playing) showFinale();
+}
+function renderHistoryTab() { renderHistory(st, $('#tab-historico'), () => openFinale(st.report, st, () => {})); }
+function showFinale() {
+  if (finaleOpen() || !st.report) return;
+  openFinale(st.report, st, () => { game.ack_report(); st = JSON.parse(game.state()); autosave(); render(); });
 }
 
 function moraleIcon(v) { return (v >= 70 ? '😃' : v >= 45 ? '🙂' : v >= 25 ? '😐' : '😠') + ' ' + v; }
@@ -328,13 +335,14 @@ function renderRound() {
     <div><span class="clock" id="clock">00'</span> <span id="period" class="big"></span></div>
     <div class="cols"><div><table id="scoreboard"><tr><th>Mandante</th><th></th><th>Visitante</th><th>Público</th><th>Renda</th></tr>
       ${mine.map((x) => `<tr class="${x === myGame ? 'me' : ''}"><td>${esc(x.homeName)}</td><td id="sc-${x.home}">- x -</td><td>${esc(x.awayName)}</td><td id="pub-${x.home}">—</td><td id="renda-${x.home}">—</td></tr>`).join('')}
-    </table><div id="subs"></div><div id="roundSummary"></div></div><div><div class="ticker" id="ticker">Aguardando o apito inicial...</div></div></div>`;
+    </table><div id="subs"></div><div id="roundSummary"></div></div><div>${isFinalStretch(st) ? '<div id="liveTable"></div>' : ''}<div class="ticker" id="ticker">Aguardando o apito inicial...</div></div></div>`;
+  renderLiveTable(st, []);
   $('#speed').onchange = (e) => { setSpeed(e.target.value); if (playing) startTimer(); };
-  $('#btnPlay').onclick = () => { game.start_round(); halftimeDone = false; runLive(); };
+  $('#btnPlay').onclick = () => { game.start_round(); halftimeDone = false; lastGoals = 0; runLive(); };
   if (st.liveActive) { halftimeDone = JSON.parse(game.live())[0]?.minute > 45; runLive(); }
 }
 
-let liveTimer = null, paused = false, halftime = false, halftimeDone = false;
+let liveTimer = null, paused = false, halftime = false, halftimeDone = false, lastGoals = 0;
 function showLive(live) {
   const myId = st.managed.id;
   const myMatch = live.find((r) => r.home === myId || r.away === myId);
@@ -352,6 +360,8 @@ function showLive(live) {
   $('#ticker').innerHTML = (halftime ? '<div class="gol">⏸ INTERVALO — faça substituições ou mude a tática e clique em "Iniciar 2º tempo".</div>' : '') +
     lines.map(({ e, r }) => `<div class="${e.kind}">${String(e.minute).padStart(2, '0')}' ${r === myMatch ? '' : '[' + esc(r.homeName) + ' x ' + esc(r.awayName) + '] '}${esc(e.text)}</div>`).join('');
   if (typeof renderSubs === 'function') renderSubs(myMatch);
+  renderLiveTable(st, live);
+  if (myMatch) { const g = myMatch.hg + myMatch.ag; if (g > lastGoals) chime('gol'); lastGoals = g; }
   return minute;
 }
 function enterHalftime() {
@@ -405,7 +415,9 @@ function finishLive() {
   $('#btnPlay').onclick = () => { render(); };
   setStatus();
   autosave();
+  if (st.reportPending) setTimeout(showFinale, 600);
 }
+
 function renderRoundSummary(f, myMatch) {
   const isHome = myMatch && myMatch.home === st.managed.id;
   const income = f.tickets + f.tv + f.transfers_in + f.prizes + f.bank_in + Math.max(0, f.loan_fees);
@@ -630,14 +642,52 @@ if (location.search.includes('selftest')) (async () => {
     store = real;
     out.push('armazenamento=ok');
     out.push('rodada_apos_load=' + JSON.parse(game.state()).round);
-    for (let i = 0; i < 29; i++) game.play_round();
-    out.push('temporada=' + JSON.parse(game.state()).season);
+    // reta final: joga até a última rodada e assiste ao vivo (tabela "se terminasse agora")
+    while (JSON.parse(game.state()).round < 28) game.play_round();
+    refresh(); tab = 'jogos'; render();
+    if (!$('#liveTable .livetable') || !$('#liveTable').textContent.includes('Penúltima')) throw 'tabela ao vivo (penúltima)';
+    game.play_round(); refresh(); tab = 'jogos'; render();
+    if (!$('#liveTable').textContent.includes('Última rodada')) throw 'tabela ao vivo (última)';
+    setSpeed('rapido');
+    $('#btnPlay').click();
+    await wait(() => JSON.parse(game.live())[0]?.minute >= 20, 5000);
+    if (document.querySelectorAll('#liveTable tr').length < 17) throw 'linhas da tabela ao vivo';
+    out.push('reta_final=ok');
+    if (!(await wait(() => !$('#finale').classList.contains('hidden'), 10000))) throw 'encerramento não abriu';
+    const seen = [];
+    for (let k = 0; k < 10 && !$('#finale').classList.contains('hidden'); k++) {
+      seen.push($('#finale .finale-win').dataset.page);
+      if (k === 1) { $('#finPrev').click(); if ($('#finale .finale-win').dataset.page !== seen[0]) throw 'anterior'; $('#finNext').click(); }
+      $('#finNext').click();
+    }
+    if (seen.join(',') !== 'campeao,acesso,premios,temporada,proxima') throw 'páginas do encerramento: ' + seen;
+    const s2 = JSON.parse(game.state());
+    if (s2.reportPending) throw 'encerramento não confirmado';
+    if (s2.history.length !== 1 || s2.history[0].champions.length !== 4) throw 'histórico';
+    out.push('encerramento=' + seen.length + 'p');
+    tab = 'historico'; render();
+    if (!$('#tab-historico').textContent.includes('Galeria de campeões')) throw 'aba histórico';
+    $('#btnReopen').click();
+    if ($('#finale').classList.contains('hidden')) throw 'rever encerramento';
+    $('#finSkipBtn').click();
+    if (!$('#finale').classList.contains('hidden')) throw 'pular';
+    out.push('historico=ok');
+    setSpeed('normal');
+    out.push('temporada=' + s2.season);
     out.push('SELFTEST_OK');
   } catch (e) { out.push('SELFTEST_FAIL ' + e); }
   document.body.insertAdjacentHTML('beforeend', `<pre id="selftest">${out.join(' | ')}</pre>`);
 })();
 
+// Demonstração do fim de temporada: index.html?finale leva o jogo até a última rodada.
+if (location.search.includes('finale')) {
+  $('#btnNew').click();
+  document.querySelector('#teamList button').click();
+  while (JSON.parse(game.state()).round < 29) game.play_round();
+  refresh(); tab = 'jogos'; render();
+}
 // Demonstração: index.html?demo inicia um jogo e começa uma rodada ao vivo.
+
 if (location.search.includes('demo')) {
   $('#btnNew').click();
   document.querySelector('#teamList button').click();

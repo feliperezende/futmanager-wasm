@@ -16,7 +16,7 @@ Jogo de gerenciamento de futebol para navegador, **original e clean-room**, insp
 - **Cartões e suspensões**: 2º amarelo = expulsão (1 jogo), vermelho direto (2 jogos), 3 amarelos acumulados = 1 jogo
 - **Lesões** de 1 a 5 rodadas; lesionados/suspensos não podem ser escalados
 - **Moral** (±10% de rendimento): sobe com vitórias e gols, cai com derrotas e banco
-- **Cansaço**: energia cai durante o jogo (conforme resistência e tática) e se recupera entre as rodadas
+- **Cansaço**: energia cai durante o jogo (conforme resistência e tática); entre as rodadas quem jogou recupera 59–69% do que perdeu (conforme a resistência) e quem descansou volta a 100%. Um titular médio se estabiliza em ~80–90%
 - **Categorias de base**: jovens surgem a cada temporada; promover ou dispensar; 5 níveis de investimento
 - **Estádio**: ampliações (+2.000/+5.000/+10.000 lugares) com obras que duram rodadas; manutenção; público depende de força, campanha e preço do ingresso
 - **Empréstimos**: pegar/ceder jogadores até o fim da temporada (taxa de 10% do valor) e empréstimo bancário com juros e parcelas por rodada
@@ -24,6 +24,9 @@ Jogo de gerenciamento de futebol para navegador, **original e clean-room**, insp
 - **Finanças** calibradas por simulação de várias temporadas: bilheteria, cotas de TV, prêmios, salários, manutenção; clubes ricos da IA investem em reforços
 - **Dívidas**: juros de 1,5% por rodada no vermelho; IA endividada vende jogadores; o técnico sofre vendas forçadas após 6 rodadas e é **demitido** após 12 (ou dívida muito alta), recebendo propostas de outros clubes
 - **Fim de temporada**: acesso/rebaixamento (2 sobem, 2 caem), premiação, evolução/envelhecimento, aposentadorias
+- **Reta final**: nas duas últimas rodadas, tabela "se terminasse agora" ao vivo, com zonas de título/acesso/rebaixamento, setas de subida/descida e ⚡ nos jogos decisivos
+- **Encerramento da temporada** em páginas (Anterior/Próximo, pode pular): campeões com taça e confete, acesso e rebaixamento, prêmios (artilheiro, craque, revelação, técnico, seleção da temporada), sua campanha com nota da diretoria e estabilidade no cargo, e prévia da próxima temporada. Sons discretos opcionais (desligados por padrão)
+- **Histórico**: galeria de campeões de todas as divisões, maiores campeões e suas temporadas
 - **Saves**: 5 slots + **autosave** a cada rodada, compactados com gzip, gravados no **IndexedDB** (com fallback para `localStorage`). Se faltar espaço, o autosave é descartado automaticamente e, se ainda assim não couber, o jogo avisa para apagar um slot. Saves antigos do `localStorage` são migrados
 
 ## Requisitos
@@ -92,6 +95,7 @@ build.sh        testes + build wasm + site em dist/
 ci/             workflow do GitHub Pages (modelo)
 www/index.html  interface
 www/main.js     lógica da interface
+www/finale.js   reta final, encerramento da temporada e histórico
 www/style.css   visual retrô
 ```
 
