@@ -1,5 +1,6 @@
 import init, { FutManager } from '../pkg/futmanager.js';
 import { openFinale, finaleOpen, renderLiveTable, renderHistory, isFinalStretch, chime } from './finale.js';
+import { initTeams, teamLink, playerLink, renderTeamsTab, previewHtml, onFieldHtml, openTeam, openPlayer, closeTeam, closePlayer, formHtml } from './teams.js';
 
 const SAVE_KEY = 'futmanager98_save'; // formato antigo (slot único)
 const SLOTS = 5;
@@ -227,6 +228,8 @@ function enterGame() { $('#start').classList.add('hidden'); $('#main').classList
 $('#btnSave').onclick = () => showSlots('save');
 $('#btnQuit').onclick = () => { if (confirm('Voltar ao menu? Progresso não salvo será perdido.')) showStart(); };
 document.querySelectorAll('.menubar [data-tab]').forEach((b) => b.onclick = () => { if (!playing) { tab = b.dataset.tab; render(); } });
+initTeams({ game: () => game, getState: () => st, refresh: () => { refresh(); }, flash, canAct: () => !playing });
+
 
 // ------------------------------------------------ Render
 function renderFired() {
@@ -249,7 +252,7 @@ function render() {
   document.querySelectorAll('.tab').forEach((s) => s.classList.add('hidden'));
   document.querySelectorAll('.menubar [data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
   $('#tab-' + tab).classList.remove('hidden');
-  ({ clube: renderClub, jogos: renderRound, tabela: renderTable, mercado: renderMarket, base: renderAcademy, financas: renderFinance, historico: renderHistoryTab })[tab]();
+  ({ clube: renderClub, jogos: renderRound, tabela: renderTable, mercado: renderMarket, base: renderAcademy, financas: renderFinance, historico: renderHistoryTab, times: () => renderTeamsTab(st, $('#tab-times')) })[tab]();
   if (st.reportPending && !playing) showFinale();
 }
 function renderHistoryTab() { renderHistory(st, $('#tab-historico'), () => openFinale(st.report, st, () => {})); }
@@ -264,8 +267,8 @@ function status(p) {
 }
 function attrs(p) { const a = p.attrs; return `${a.finishing}/${a.passing}/${a.tackling}/${a.keeping}/${a.stamina}`; }
 function playerRow(p, extra, mid) {
-  if (mid) return `<td class="pos-${p.pos}">${p.pos}</td><td>${esc(p.name)} <small>${status(p)}</small></td><td>${p.skill}</td>${extra}<td>${p.age}</td><td>${money(p.salary)}</td><td>${money(p.value)}</td>`;
-  return `<td class="pos-${p.pos}">${p.pos}</td><td>${esc(p.name)} <small>${status(p)}</small></td><td>${p.skill}</td><td>${p.age}</td><td>${money(p.salary)}</td><td>${money(p.value)}</td>${extra}`;
+  if (mid) return `<td class="pos-${p.pos}">${p.pos}</td><td>${playerLink(p.id, p.name)} <small>${status(p)}</small></td><td>${p.skill}</td>${extra}<td>${p.age}</td><td>${money(p.salary)}</td><td>${money(p.value)}</td>`;
+  return `<td class="pos-${p.pos}">${p.pos}</td><td>${playerLink(p.id, p.name)} <small>${status(p)}</small></td><td>${p.skill}</td><td>${p.age}</td><td>${money(p.salary)}</td><td>${money(p.value)}</td>${extra}`;
 }
 
 function renderClub() {
@@ -334,8 +337,9 @@ function renderRound() {
     &nbsp; Velocidade: <select id="speed">${Object.entries(SPEEDS).map(([k, v]) => `<option value="${k}" ${k === getSpeed() ? 'selected' : ''}>${v.label}</option>`).join('')}</select>
     <div><span class="clock" id="clock">00'</span> <span id="period" class="big"></span></div>
     <div class="cols"><div><table id="scoreboard"><tr><th>Mandante</th><th></th><th>Visitante</th><th>Público</th><th>Renda</th></tr>
-      ${mine.map((x) => `<tr class="${x === myGame ? 'me' : ''}"><td>${esc(x.homeName)}</td><td id="sc-${x.home}">- x -</td><td>${esc(x.awayName)}</td><td id="pub-${x.home}">—</td><td id="renda-${x.home}">—</td></tr>`).join('')}
-    </table><div id="subs"></div><div id="roundSummary"></div></div><div>${isFinalStretch(st) ? '<div id="liveTable"></div>' : ''}<div class="ticker" id="ticker">Aguardando o apito inicial...</div></div></div>`;
+      ${mine.map((x) => `<tr class="${x === myGame ? 'me' : ''}"><td>${teamLink(x.home, x.homeName)}</td><td id="sc-${x.home}">- x -</td><td>${teamLink(x.away, x.awayName)}</td><td id="pub-${x.home}">—</td><td id="renda-${x.home}">—</td></tr>`).join('')}
+    </table><div id="subs"></div><div id="roundSummary"></div></div><div>${isFinalStretch(st) ? '<div id="liveTable"></div>' : ''}<div class="ticker" id="ticker">Aguardando o apito inicial...</div></div></div>
+    <div id="preview">${st.round < st.rounds ? previewHtml(game, m.id, myGame ? (myGame.home === m.id ? myGame.away : myGame.home) : null) : ''}</div><div id="onfield"></div>`;
   renderLiveTable(st, []);
   $('#speed').onchange = (e) => { setSpeed(e.target.value); if (playing) startTimer(); };
   $('#btnPlay').onclick = () => { game.start_round(); halftimeDone = false; lastGoals = 0; runLive(); };
@@ -361,6 +365,8 @@ function showLive(live) {
     lines.map(({ e, r }) => `<div class="${e.kind}">${String(e.minute).padStart(2, '0')}' ${r === myMatch ? '' : '[' + esc(r.homeName) + ' x ' + esc(r.awayName) + '] '}${esc(e.text)}</div>`).join('');
   if (typeof renderSubs === 'function') renderSubs(myMatch);
   renderLiveTable(st, live);
+  const of = document.getElementById('onfield');
+  if (of && myMatch && minute > 0) { const pv = document.getElementById('preview'); if (pv) pv.innerHTML = ''; of.innerHTML = onFieldHtml(myMatch); }
   if (myMatch) { const g = myMatch.hg + myMatch.ag; if (g > lastGoals) chime('gol'); lastGoals = g; }
   return minute;
 }
@@ -470,9 +476,9 @@ function renderTable() {
   const t = st.tables[tableDiv];
   $('#tab-tabela').innerHTML = `Divisão: <select id="tdiv">${[0, 1, 2, 3].map((d) => `<option value="${d}" ${d === tableDiv ? 'selected' : ''}>Divisão ${d + 1}</option>`).join('')}</select>
     <div class="cols"><div><table><tr><th>#</th><th>Clube</th><th>J</th><th>V</th><th>E</th><th>D</th><th>GP</th><th>GC</th><th>SG</th><th>Pts</th></tr>
-    ${t.map((r, i) => `<tr class="${r.id === st.managed.id ? 'me' : ''} ${i < 2 && tableDiv > 0 ? 'up' : ''} ${i >= t.length - 2 && tableDiv < 3 ? 'down' : ''}"><td>${i + 1}</td><td>${esc(r.name)}</td><td>${r.p}</td><td>${r.w}</td><td>${r.d}</td><td>${r.l}</td><td>${r.gf}</td><td>${r.ga}</td><td>${r.gf - r.ga}</td><td><b>${r.pts}</b>${r.ded ? ` <span style="color:#c00" title="Punição por dívidas">(-${r.ded})</span>` : ''}</td></tr>`).join('')}
+    ${t.map((r, i) => `<tr class="${r.id === st.managed.id ? 'me' : ''} ${i < 2 && tableDiv > 0 ? 'up' : ''} ${i >= t.length - 2 && tableDiv < 3 ? 'down' : ''}"><td>${i + 1}</td><td>${teamLink(r.id, r.name)} ${formHtml(r.form)}</td><td>${r.p}</td><td>${r.w}</td><td>${r.d}</td><td>${r.l}</td><td>${r.gf}</td><td>${r.ga}</td><td>${r.gf - r.ga}</td><td><b>${r.pts}</b>${r.ded ? ` <span style="color:#c00" title="Punição por dívidas">(-${r.ded})</span>` : ''}</td></tr>`).join('')}
     </table><small>Verde: zona de acesso • Vermelho: zona de rebaixamento • (-N): pontos perdidos por dívidas (3 a cada 8 rodadas no vermelho; a cada 4 se a dívida for muito alta)</small></div>
-    <div><table><tr><th colspan="3">Artilharia geral</th></tr>${st.scorers.map((p) => `<tr><td>${esc(p.name)}</td><td>${esc(p.teamName)}</td><td>${p.goals}</td></tr>`).join('')}</table></div></div>`;
+    <div><table><tr><th colspan="3">Artilharia geral</th></tr>${st.scorers.map((p) => `<tr><td>${playerLink(p.id, p.name)}</td><td>${teamLink(p.team, p.teamName)}</td><td>${p.goals}</td></tr>`).join('')}</table></div></div>`;
   $('#tdiv').onchange = (e) => { tableDiv = +e.target.value; renderTable(); };
 }
 
@@ -485,7 +491,8 @@ function renderMarket() {
     Preço máximo (R$): <input id="mmax" title="Mostra apenas jogadores até este preço" type="number" value="${max}" step="100000"> <button id="mgo">Filtrar</button>
     <span>Orçamento: <b>${money(st.managed.budget)}</b> — Elenco: ${st.managed.squad.length}/28</span>
     <div class="list"><table><tr><th>Pos</th><th>Nome</th><th>Hab.</th><th>Idade</th><th>Salário/rod.</th><th>Valor</th><th>Clube</th><th>Preço</th><th></th></tr>
-    ${list.map((p) => `<tr>${playerRow(p, `<td>${esc(p.teamName)}</td><td>${money(p.buyPrice)}</td><td><button data-buy="${p.id}">Comprar</button>${p.team !== null ? ` <button data-loanin="${p.id}">Empréstimo (${money(p.loanFee)})</button>` : ''}</td>`)}</tr>`).join('')}
+    ${list.map((p) => `<tr>${playerRow(p, `<td>${teamLink(p.team, p.teamName)}</td>
+<td>${money(p.buyPrice)}</td><td><button data-buy="${p.id}">Comprar</button>${p.team !== null ? ` <button data-loanin="${p.id}">Empréstimo (${money(p.loanFee)})</button>` : ''}</td>`)}</tr>`).join('')}
     </table></div><small>Jogadores sem clube custam 20% do valor (luvas); de outros clubes, 110% do valor. Empréstimo: 10% do valor até o fim da temporada (você paga o salário).</small>`;
   $('#mgo').onclick = () => { mkPos = $('#mpos').value; mkMax = $('#mmax').value; renderMarket(); };
   document.querySelectorAll('[data-loanin]').forEach((b) => b.onclick = () => { flash(JSON.parse(game.loan_in(+b.dataset.loanin))); refresh(); });
@@ -562,6 +569,35 @@ if (location.search.includes('selftest')) (async () => {
     setSpeed('normal');
     tab = 'jogos'; render();
     if ($('#speed').value !== 'normal') throw 'velocidade não persistida';
+    // pré-jogo: escalação provável do adversário
+    const boxes = document.querySelectorAll('#preview .xi-box');
+    if (boxes.length !== 2 || !boxes[1].textContent.includes('Próximo adversário')) throw 'pré-jogo do adversário';
+    if (boxes[1].querySelectorAll('tr').length !== 12) throw 'XI provável do adversário';
+    if (!boxes[1].querySelector('.form') && !boxes[1].textContent.includes('Forma')) throw 'forma do adversário';
+    boxes[1].querySelector('.tlink').click();
+    if ($('#teamview').classList.contains('hidden')) throw 'ficha do adversário';
+    const nSquad = document.querySelectorAll('#teamview .sortable tr').length - 1;
+    if (nSquad < 16) throw 'elenco na ficha: ' + nSquad;
+    document.querySelector('#teamview [data-sort="skill"]').click();
+    const sk = [...document.querySelectorAll('#teamview .sortable tr')].slice(1).map((r) => +r.children[2].textContent);
+    if (sk.some((v, i) => i && v > sk[i - 1])) throw 'ordenação por habilidade';
+    if (!document.querySelector('#teamview [data-tvbuy]') || !document.querySelector('#teamview [data-tvloan]')) throw 'ações de mercado na ficha';
+    document.querySelector('#teamview .plink').click();
+    if ($('#playercard').classList.contains('hidden') || !$('#playercard').textContent.includes('Finalização')) throw 'cartão do jogador';
+    closePlayer(); closeTeam();
+    out.push('adversario=ok');
+    tab = 'times'; render();
+    if (document.querySelectorAll('#tab-times .team-card').length !== 16) throw 'aba times';
+    $('#teamsDiv').value = '0'; $('#teamsDiv').onchange({ target: $('#teamsDiv') });
+    document.querySelectorAll('#tab-times .team-card')[3].click();
+    if ($('#teamview').classList.contains('hidden') || !$('#teamview').textContent.includes('1ª')) throw 'ficha pela aba times';
+    closeTeam();
+    tab = 'tabela'; render();
+    document.querySelector('#tab-tabela .tlink').click();
+    if ($('#teamview').classList.contains('hidden')) throw 'ficha pela classificação';
+    closeTeam();
+    out.push('times=ok');
+    tab = 'jogos'; render();
     $('#btnPlay').click();
     if (!(await wait(() => !$('#btnHalf').classList.contains('hidden'), 15000))) throw 'não parou no intervalo';
     await new Promise((r) => setTimeout(r, 800));
@@ -569,6 +605,11 @@ if (location.search.includes('selftest')) (async () => {
     const pubCells = [...document.querySelectorAll('[id^="pub-"]')].map((c) => c.textContent);
     if (pubCells.some((t) => t === '—')) throw 'público não exibido';
     if ([...document.querySelectorAll('[id^="renda-"]')].some((c) => !c.textContent.startsWith('R$'))) throw 'renda não exibida';
+    const ofb = document.querySelectorAll('#onfield .onfield');
+    if (ofb.length !== 2 || [...ofb].some((b) => b.querySelectorAll('tr').length < 10) || !$('#onfield .small-meter')) throw 'jogadores em campo';
+    if ($('#preview').innerHTML !== '') throw 'pré-jogo deveria sumir durante o jogo';
+    out.push('em_campo=ok');
+
     $('#btnHalf').click();
     if (!(await wait(() => !playing, 15000))) throw 'partida não terminou';
     if (!$('#roundSummary').textContent.includes('Saldo da rodada')) throw 'resumo da rodada';

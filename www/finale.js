@@ -2,6 +2,7 @@
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const money = (v) => { const n = Math.round(v); return (n < 0 ? '−' : '') + 'R$ ' + Math.abs(n).toLocaleString('pt-BR'); };
 const DIV = (d) => `Divisão ${d + 1}`;
+const tl = (n) => n ? `<span class="tlink" data-tname="${esc(n)}" title="Ver ficha do clube">${esc(n)}</span>` : '—';
 
 // ---------------------------------------------------------------- som (opcional, desligado por padrão)
 const SOUND_KEY = 'futmanager98_pref_sound';
@@ -109,7 +110,7 @@ export function confetti(host) {
   setTimeout(() => box.remove(), 6000);
 }
 
-const pj = (p) => p ? `<b>${esc(p.name)}</b> (${esc(p.pos)}, ${p.age} anos) — ${esc(p.team)}` : '—';
+const pj = (p) => p ? `<b>${esc(p.name)}</b> (${esc(p.pos)}, ${p.age} anos) — ${tl(p.team)}` : '—';
 function fateMsg(u) {
   const d = u.division;
   return {
@@ -129,13 +130,13 @@ function pages(r, st) {
   const P = [];
   P.push({ key: 'campeao', title: '🏆 Campeões da temporada', party: celebrate, sound: celebrate ? 'festa' : '', html: `
     <div class="champ-hero ${u && u.champion ? 'mine' : ''}">${TROPHY}
-      <div><div class="small">Temporada ${r.season} — ${DIV(myDiv)}</div><div class="champ-name">${esc(champ.name)}</div>
+      <div><div class="small">Temporada ${r.season} — ${DIV(myDiv)}</div><div class="champ-name">${tl(champ.name)}</div>
       <div>${champ.pts} pontos · ${champ.w}V ${champ.d}E ${champ.l}D · ${champ.gf} gols</div>
-      ${u && u.champion ? '<div class="party">É CAMPEÃO! A taça é sua!</div>' : `<div class="small">Vice: ${esc(r.divisions[myDiv].runnerUp.name)} (${r.divisions[myDiv].runnerUp.pts} pts)</div>`}</div></div>
+      ${u && u.champion ? '<div class="party">É CAMPEÃO! A taça é sua!</div>' : `<div class="small">Vice: ${tl(r.divisions[myDiv].runnerUp.name)} (${r.divisions[myDiv].runnerUp.pts} pts)</div>`}</div></div>
     <table><tr><th>Divisão</th><th>Campeão</th><th>Pts</th><th>Vice</th><th>Artilheiro</th></tr>
-    ${r.divisions.map((d) => `<tr class="${u && d.champion.id === u.id ? 'me' : ''}"><td>🏆 ${DIV(d.division)}</td><td><b>${esc(d.champion.name)}</b></td><td class="n">${d.champion.pts}</td><td>${esc(d.runnerUp.name)}</td><td>${d.topScorer ? `${esc(d.topScorer.name)} (${d.topScorer.goals})` : '—'}</td></tr>`).join('')}</table>` });
+    ${r.divisions.map((d) => `<tr class="${u && d.champion.id === u.id ? 'me' : ''}"><td>🏆 ${DIV(d.division)}</td><td><b>${tl(d.champion.name)}</b></td><td class="n">${d.champion.pts}</td><td>${tl(d.runnerUp.name)}</td><td>${d.topScorer ? `${esc(d.topScorer.name)} (${d.topScorer.goals})` : '—'}</td></tr>`).join('')}</table>` });
   const [snd, msg] = u ? fateMsg(u) : ['', ''];
-  const teamCell = (t) => `<span class="${u && t.id === u.id ? 'me-inline' : ''}">${esc(t.name)}</span>`;
+  const teamCell = (t) => `<span class="tlink ${u && t.id === u.id ? 'me-inline' : ''}" data-team="${t.id}">${esc(t.name)}</span>`;
   P.push({ key: 'acesso', title: '⬆⬇ Acesso e rebaixamento', party: u && u.promoted, sound: snd, html: `
     ${u ? `<p class="fate fate-${u.fate}">${msg}</p>` : ''}
     <table><tr><th>Divisão</th><th>⬆ Sobem</th><th>⬇ Caem</th></tr>
@@ -239,10 +240,10 @@ export function renderHistory(st, el, reopen) {
   const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
   el.innerHTML = h.length === 0 ? `<fieldset><legend>Histórico</legend><p>Nenhuma temporada encerrada ainda. Termine a temporada ${st.season} para inaugurar a galeria de campeões!</p></fieldset>` : `
     <fieldset><legend>🏛 Galeria de campeões</legend><table><tr><th>Temp.</th>${[0, 1, 2, 3].map((d) => `<th>🏆 ${DIV(d)}</th>`).join('')}<th>Artilheiro</th></tr>
-      ${h.slice().reverse().map((s) => `<tr><td class="n">${s.season}</td>${s.champions.map((c) => `<td class="${c === s.team ? 'me' : ''}">${esc(c)}</td>`).join('')}<td>${esc(s.topScorer || '—')}</td></tr>`).join('')}</table></fieldset>
+      ${h.slice().reverse().map((s) => `<tr><td class="n">${s.season}</td>${s.champions.map((c) => `<td class="${c === s.team ? 'me' : ''}">${tl(c)}</td>`).join('')}<td>${esc(s.topScorer || '—')}</td></tr>`).join('')}</table></fieldset>
     <div class="cols"><div><fieldset><legend>📋 Suas temporadas (${titles} título(s))</legend><table><tr><th>Temp.</th><th>Clube</th><th>Div.</th><th>Pos.</th><th>Esperado</th><th>Pts</th><th>Nota</th><th></th></tr>
-      ${h.slice().reverse().filter((s) => s.team).map((s) => `<tr><td class="n">${s.season}</td><td>${esc(s.team)}</td><td class="n">${s.division + 1}</td><td class="n">${s.position}º</td><td class="n">${s.expected}º</td><td class="n">${s.pts}</td><td class="n">${Number(s.grade).toFixed(1).replace('.', ',')}</td><td>${fateIcon[s.fate] || ''}</td></tr>`).join('')}</table></fieldset></div>
-    <div><fieldset><legend>⭐ Maiores campeões</legend><table><tr><th>Clube</th><th>Títulos</th></tr>${top.map(([c, n]) => `<tr><td>${esc(c)}</td><td class="n">${n}</td></tr>`).join('')}</table></fieldset>
+      ${h.slice().reverse().filter((s) => s.team).map((s) => `<tr><td class="n">${s.season}</td><td>${tl(s.team)}</td><td class="n">${s.division + 1}</td><td class="n">${s.position}º</td><td class="n">${s.expected}º</td><td class="n">${s.pts}</td><td class="n">${Number(s.grade).toFixed(1).replace('.', ',')}</td><td>${fateIcon[s.fate] || ''}</td></tr>`).join('')}</table></fieldset></div>
+    <div><fieldset><legend>⭐ Maiores campeões</legend><table><tr><th>Clube</th><th>Títulos</th></tr>${top.map(([c, n]) => `<tr><td>${tl(c)}</td><td class="n">${n}</td></tr>`).join('')}</table></fieldset>
     ${st.report ? '<button id="btnReopen">🏆 Rever encerramento da última temporada</button>' : ''}</div></div>`;
   const b = el.querySelector('#btnReopen'); if (b) b.onclick = reopen;
 }

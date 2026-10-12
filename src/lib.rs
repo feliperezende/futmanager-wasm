@@ -193,6 +193,9 @@ pub struct Team {
     /// Rodadas consecutivas com caixa negativo
     #[serde(default)]
     pub debt_rounds: u32,
+    /// Últimos resultados (V/E/D), mais recente por último, até 5
+    #[serde(default)]
+    pub form: String,
 }
 
 /// Juros por rodada sobre saldo negativo (%)
@@ -326,7 +329,7 @@ impl Game {
                 teams.push(Team { id, name, division: div, budget: DIV_BUDGET[div] + rng.range(0, 10) * DIV_BUDGET[div] / 20,
                     capacity: DIV_CAPACITY[div] * rng.range(70, 130) / 100, ticket_price: DIV_TICKET[div],
                     formation: rng.pick(&FORMATIONS).to_string(), lineup: vec![], stats: Stats::default(), academy_level: 1, construction: None,
-                    bank_debt: 0, bank_payment: 0, tactic: default_tactic(), pressing: false, debt_rounds: 0 });
+                    bank_debt: 0, bank_payment: 0, tactic: default_tactic(), pressing: false, debt_rounds: 0, form: String::new() });
                 for (pos, n) in [(Pos::G, 2), (Pos::D, 6), (Pos::M, 6), (Pos::A, 4)] {
                     for _ in 0..n { let p = Self::gen_player(&mut rng, players.len(), pos, base, Some(id)); players.push(p); }
                 }
@@ -544,7 +547,9 @@ impl Game {
         }).collect();
     }
 
-    pub fn auto_lineup(&mut self, team: usize) {
+    pub fn auto_lineup(&mut self, team: usize) { self.teams[team].lineup = self.pick_lineup(team); }
+    /// Melhor escalação disponível (sem lesionados/suspensos) na formação do clube.
+    pub fn pick_lineup(&self, team: usize) -> Vec<usize> {
         let (d, m, a) = formation_counts(&self.teams[team].formation).unwrap_or((4, 4, 2));
         let mut sq: Vec<usize> = self.squad(team).into_iter().filter(|&id| self.players[id].available()).collect();
         sq.sort_by_key(|&id| -self.players[id].skill);
@@ -554,7 +559,7 @@ impl Game {
         }
         // completa com quem sobrar se faltar alguém da posição
         for &id in &sq { if chosen.len() >= 11 { break; } if !chosen.contains(&id) { chosen.push(id); } }
-        self.teams[team].lineup = chosen;
+        chosen
     }
 
     pub fn set_lineup(&mut self, team: usize, formation: &str, ids: &[usize]) -> Result<(), String> {
@@ -1030,6 +1035,9 @@ impl Game {
             let s = &mut self.teams[t].stats;
             s.p += 1; s.gf += gf as i32; s.ga += ga as i32;
             if gf > ga { s.w += 1; s.pts += 3 } else if gf == ga { s.d += 1; s.pts += 1 } else { s.l += 1 }
+            let f = &mut self.teams[t].form;
+            f.push(if gf > ga { 'V' } else if gf == ga { 'E' } else { 'D' });
+            while f.chars().count() > 5 { f.remove(0); }
         }
     }
 
@@ -1384,16 +1392,49 @@ impl Game {
             "home": m.home, "away": m.away, "homeName": self.teams[m.home].name, "awayName": self.teams[m.away].name,
             "hg": m.hg, "ag": m.ag, "minute": m.minute, "events": m.events, "subs": m.subs, "bench": bench,
             "attendance": m.attendance, "receipts": m.receipts, "capacity": self.teams[m.home].capacity,
+            "booked": m.booked, "sentOff": m.reds.iter().map(|r| r.0).collect::<Vec<_>>(), "hurt": m.injuries.iter().map(|r| r.0).collect::<Vec<_>>(),
+            "outIds": m.out, "outPlayers": m.out.iter().map(|&id| serde_json::json!({"id": id, "name": self.players[id].name, "pos": self.players[id].pos.label(), "team": self.players[id].team})).collect::<Vec<_>>(),
+            "tactics": [&self.teams[m.home].tactic, &self.teams[m.away].tactic], "formations": [&self.teams[m.home].formation, &self.teams[m.away].formation],
             "energy": m.energy.iter().map(|(k, v)| (k.to_string(), serde_json::json!(v))).collect::<serde_json::Map<String, serde_json::Value>>(),
 
             "on": [m.on[0].iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>(),
                    m.on[1].iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>()]}) }).collect())
     }
 
+    /// Ficha somente leitura de qualquer clube.
+    pub fn team_json(&self, t: usize) -> serde_json::Value {
+        let team = &self.teams[t];
+        let d = team.division;
+        let pos = self.table(d).iter().position(|&x| x == t).unwrap_or(0) + 1;
+        let (atk, def) = self.strength(t);
+        let order = |p: &Pos| match p { Pos::G => 0, Pos::D => 1, Pos::M => 2, Pos::A => 3 };
+        let mut squad = self.squad(t);
+        squad.sort_by_key(|&id| (order(&self.players[id].pos), -self.players[id].skill));
+        // escalação provável: a mesma regra usada no início da rodada
+        let probable = if Some(t) == self.managed && self.lineup_valid(t) { team.lineup.clone() } else { self.pick_lineup(t) };
+        let roles = self.assign_roles(t, &probable);
+        let mut xi: Vec<(usize, Pos)> = roles.clone();
+        xi.sort_by_key(|(id, r)| (order(r), -self.players[*id].skill));
+        let unavailable: Vec<usize> = squad.iter().copied().filter(|&id| !self.players[id].available()).collect();
+        let mut scorers: Vec<usize> = squad.iter().copied().filter(|&id| self.players[id].goals > 0).collect();
+        scorers.sort_by_key(|&id| -self.players[id].goals);
+        let s = &team.stats;
+        serde_json::json!({"id": t, "name": team.name, "division": d, "position": pos, "budget": team.budget, "capacity": team.capacity,
+            "ticketPrice": team.ticket_price, "academyLevel": team.academy_level, "form": team.form, "formation": team.formation, "tactic": team.tactic,
+            "pressing": team.pressing, "attack": (atk * 10.0).round() / 10.0, "defense": (def * 10.0).round() / 10.0, "morale": self.team_morale(t),
+            "managed": Some(t) == self.managed, "expected": self.expected.get(t).copied(),
+            "stats": {"p": s.p, "w": s.w, "d": s.d, "l": s.l, "gf": s.gf, "ga": s.ga, "pts": s.pts},
+            "wageBill": squad.iter().map(|&id| self.players[id].salary).sum::<i64>(),
+            "lineup": xi.iter().map(|(id, r)| { let mut v = self.player_json(&self.players[*id]); v["role"] = serde_json::json!(r.label()); v }).collect::<Vec<_>>(),
+            "unavailable": unavailable.iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>(),
+            "squad": squad.iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>(),
+            "scorers": scorers.iter().take(5).map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>()})
+    }
+
     pub fn state_json(&self) -> serde_json::Value {
         let tables: Vec<_> = (0..DIVISIONS).map(|d| self.table(d).iter().map(|&t| {
             let s = &self.teams[t].stats;
-            serde_json::json!({"id": t, "name": self.teams[t].name, "p": s.p, "w": s.w, "d": s.d, "l": s.l, "gf": s.gf, "ga": s.ga, "pts": s.pts, "ded": s.deducted})
+            serde_json::json!({"id": t, "name": self.teams[t].name, "p": s.p, "w": s.w, "d": s.d, "l": s.l, "gf": s.gf, "ga": s.ga, "pts": s.pts, "ded": s.deducted, "form": self.teams[t].form})
         }).collect::<Vec<_>>()).collect();
         let mut next: Vec<serde_json::Value> = vec![];
         if self.round < ROUNDS { for d in 0..DIVISIONS { for &(h, a) in &self.schedule[d][self.round] {
@@ -1546,6 +1587,22 @@ impl FutManager {
     pub fn state(&self) -> String { self.g.state_json().to_string() }
     /// O usuário viu o encerramento da temporada.
     pub fn ack_report(&mut self) { self.g.report_pending = false; }
+    /// Ficha de qualquer clube (somente leitura).
+    pub fn team(&self, id: usize) -> String {
+        if id >= self.g.teams.len() { return "null".into(); }
+        self.g.team_json(id).to_string()
+    }
+    /// Cartão de um jogador.
+    pub fn player(&self, id: usize) -> String {
+        if id >= self.g.players.len() || self.g.players[id].retired { return "null".into(); }
+        let p = &self.g.players[id];
+        let mut v = self.g.player_json(p);
+        v["academy"] = serde_json::json!(p.academy);
+        v["mine"] = serde_json::json!(p.team.is_some() && p.team == self.g.managed);
+        v["season"] = serde_json::json!(self.g.season);
+        v.to_string()
+    }
+
 
     /// Resumo para a lista de saves (clube, temporada, rodada, caixa).
     pub fn summary(&self) -> String { self.g.summary_json().to_string() }
@@ -2217,7 +2274,45 @@ mod tests {
     }
 
     #[test]
+    fn team_viewer_and_form() {
+        let mut g = Game::new(5);
+        g.managed = Some(0);
+        for _ in 0..7 { g.play_round(); }
+        for t in 0..g.teams.len() {
+            assert_eq!(g.teams[t].form.chars().count(), 5);
+            assert!(g.teams[t].form.chars().all(|c| "VED".contains(c)));
+        }
+        let t = 17;
+        let v = g.team_json(t);
+        assert_eq!(v["id"], t);
+        assert_eq!(v["squad"].as_array().unwrap().len(), g.squad(t).len());
+        assert_eq!(v["lineup"].as_array().unwrap().len(), 11);
+        assert!(v["lineup"].as_array().unwrap().iter().all(|p| p["role"].is_string() && p["condition"].is_i64()));
+        // desfalques nunca aparecem na escalação provável
+        let hurt = g.squad(t)[0];
+        g.players[hurt].injured = 3;
+        let v = g.team_json(t);
+        assert!(v["lineup"].as_array().unwrap().iter().all(|p| p["injured"] == 0 && p["suspended"] == 0));
+        assert!(v["unavailable"].as_array().unwrap().iter().any(|p| p["id"] == hurt));
+        assert_eq!(v["lineup"].as_array().unwrap().len(), 11);
+
+        let pos = v["position"].as_u64().unwrap() as usize;
+        assert_eq!(g.table(g.teams[t].division)[pos - 1], t);
+        assert!(v["attack"].as_f64().unwrap() > 0.0 && v["defense"].as_f64().unwrap() > 0.0);
+        let st = g.state_json();
+        assert_eq!(st["tables"][0][0]["form"].as_str().unwrap().len(), 5);
+        // ao vivo: listas em campo e cartões expostos
+        g.start_round();
+        for _ in 0..90 { g.step(); }
+        let live = g.live_json(0);
+        let m = &live[0];
+        assert!(m["booked"].is_array() && m["sentOff"].is_array() && m["outPlayers"].is_array());
+        assert!(m["on"][1].as_array().unwrap().len() >= 9);
+    }
+
+    #[test]
     fn season_report_and_history() {
+
         let mut g = Game::new(77);
         g.managed = Some(20);
         assert_eq!(g.expected.len(), g.teams.len());

@@ -117,3 +117,25 @@ tr.decisive td{box-shadow:inset 0 0 0 1px #c80}tr.decisive td:nth-child(2)::befo
 .confetti i{position:absolute;top:-12px;width:7px;height:11px;animation:fall linear forwards}
 @keyframes fall{to{top:110%;transform:rotate(720deg) translateX(40px)}}
 @media (max-width:640px){.finale-win{width:96vw}.champ-hero{flex-direction:column;text-align:center}.champ-name{font-size:20px}.board{flex-direction:column}.meter{width:100%}.finale-nav{flex-wrap:wrap}.xi-p{min-width:0}}
+
+/* ---- Times / ficha do clube / pré-jogo ---- */
+.tlink,.plink{cursor:pointer;text-decoration:underline dotted #000080;text-underline-offset:2px}.tlink:hover,.plink:hover{color:#00f;text-decoration-style:solid}
+tr.me .tlink{color:inherit}
+.form b{display:inline-block;width:15px;text-align:center;font-size:10px;color:#fff;margin-right:1px;border:1px solid #000}
+.form .f-V{background:#080}.form .f-E{background:#888}.form .f-D{background:#b00}
+.cols2{display:flex;gap:8px;flex-wrap:wrap}.cols2>*{flex:1 1 360px;min-width:0}
+.xi-box table{width:100%}.xi-sum{margin-bottom:4px}
+.cond-low{color:#b00;font-weight:bold}.cond-mid{color:#a60}
+.small-meter{display:inline-block;width:60px;height:9px;vertical-align:middle}.small-meter div{background:#080}.small-meter div.mid{background:#c90}.small-meter div.low{background:#b00}
+.teamview{width:980px}.teamview .list{max-height:44vh}
+.sortable th{cursor:pointer;user-select:none}.sortable th:hover{background:#d4d0c8;text-decoration:underline}
+tr.xi td{background:#f2f2ff}
+.kv td:first-child{font-weight:bold;white-space:nowrap;padding-right:8px}
+.playercard{width:380px}.pc-head{display:flex;gap:10px;align-items:center;margin-bottom:6px}
+.pc-pos{font-size:18px;font-weight:bold;padding:6px 8px;border:2px outset #fff}.pc-skill{margin-left:auto;font-size:28px;font-weight:bold;color:#000080}
+.playercard .small-meter{width:140px}.playercard .small-meter div{background:#000080}
+.team-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px;margin-top:6px}
+.team-card{text-align:left;padding:6px;line-height:1.5;height:auto}.team-card.me{background:#ffffc0}
+#teamview,#playercard{z-index:20}#playercard{z-index:30}
+@media (max-width:640px){.teamview,.playercard{width:96vw}.cols2>*{flex-basis:100%}.team-grid{grid-template-columns:1fr 1fr}}
+.teamview .sortable td:nth-child(2){white-space:nowrap}.nowrap{white-space:nowrap}.teamview .sortable button{padding:1px 4px;min-width:0}
