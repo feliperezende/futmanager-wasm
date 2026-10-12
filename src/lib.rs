@@ -152,6 +152,13 @@ pub struct LiveMatch {
 }
 
 pub const MAX_SUBS: u8 = 3;
+/// Chance de gol de bola rolando por minuto (time médio)
+pub const OPEN_PLAY_GOAL: f64 = 0.0107;
+/// Chance de pênalti por time por minuto (~0,25 por jogo)
+pub const PENALTY_PER_MIN: f64 = 0.25 / 90.0;
+/// Conversão de pênalti: ~75% para cobrador e goleiro equivalentes.
+pub fn penalty_conversion(finishing: f64, keeping: f64) -> f64 { (0.75 + (finishing - keeping) / 300.0).clamp(0.55, 0.92) }
+
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Stats { pub p: i32, pub w: i32, pub d: i32, pub l: i32, pub gf: i32, pub ga: i32, pub pts: i32,
@@ -680,6 +687,31 @@ impl Game {
         Ok(format!("Tática: {mentality}{}", if pressing { ", com pressão" } else { "" }))
     }
 
+    /// Pênalti a favor de `side`: cobrador (melhor finalização) contra o goleiro adversário.
+    fn penalty(&mut self, m: &mut LiveMatch, side: usize) {
+        let minute = m.minute;
+        let team = if side == 0 { m.home } else { m.away };
+        let ev = |kind: &str, text: String| Event { minute, side: side as u8, kind: kind.into(), text };
+        let Some(taker) = m.on[side].iter().copied().max_by_key(|&id| (self.players[id].pos != Pos::G, self.players[id].attrs.finishing, std::cmp::Reverse(id))) else { return };
+        let keeper = m.on[1 - side].iter().copied().max_by_key(|&id| (self.players[id].pos == Pos::G, self.players[id].attrs.keeping, std::cmp::Reverse(id)));
+        let fin = self.players[taker].attrs.finishing as f64;
+        let keep = keeper.map(|k| self.players[k].attrs.keeping as f64).unwrap_or(10.0);
+        let conv = penalty_conversion(fin, keep);
+        let name = self.players[taker].name.clone();
+        m.events.push(ev("penalti", format!("PÊNALTI para o {}! {} vai para a cobrança...", self.teams[team].name, name)));
+        let r = self.rng.f64();
+        if r < conv {
+            self.players[taker].goals += 1;
+            if side == 0 { m.hg += 1 } else { m.ag += 1 }
+            m.events.push(ev("gol", format!("GOOOL! {} converte o PÊNALTI ({})", name, self.teams[team].name)));
+        } else if r < conv + (1.0 - conv) * 0.6 {
+            let k = keeper.map(|k| self.players[k].name.clone()).unwrap_or_else(|| "o goleiro".into());
+            m.events.push(ev("penalti_perdido", format!("O goleiro {k} defende o pênalti de {name}!")));
+        } else {
+            m.events.push(ev("penalti_perdido", format!("{name} chuta o pênalti para fora!")));
+        }
+    }
+
     /// Avança um minuto de uma partida ao vivo.
     fn step_match(&mut self, m: &mut LiveMatch) {
         if m.minute >= 90 { return; }
@@ -702,8 +734,9 @@ impl Game {
         if self.teams[m.away].pressing { ah *= 0.93; }
         if self.teams[m.home].pressing { aa *= 0.93; }
         // normaliza: um time "médio" tem ataque ~ 0.55*defesa
-        let ph = 0.0125 * ((ah / da) / 0.55).powf(1.6) * 1.12;
-        let pa = 0.0125 * ((aa / dh) / 0.55).powf(1.6);
+        // gols de bola rolando (pênaltis à parte, ver PENALTY_PER_MIN)
+        let ph = OPEN_PLAY_GOAL * ((ah / da) / 0.55).powf(1.6) * 1.12;
+        let pa = OPEN_PLAY_GOAL * ((aa / dh) / 0.55).powf(1.6);
         for (side, p) in [(0usize, ph), (1usize, pa)] {
             if m.on[side].is_empty() { continue; }
             let r = self.rng.f64();
@@ -744,6 +777,8 @@ impl Game {
                     Some(b) if m.subs[side] < MAX_SUBS => { let _ = self.substitute(m, side, pl, b); }
                     _ => { m.on[side].retain(|&x| x != pl); m.out.push(pl); }
                 }
+            } else if r < p * 3.0 + 0.0045 + 0.0011 + PENALTY_PER_MIN {
+                self.penalty(m, side);
             }
         }
         // substituições táticas da IA
@@ -2430,5 +2465,45 @@ mod size_probe {
         println!("inicial {}", serde_json::to_string(&g).unwrap().len());
         for _ in 0..super::ROUNDS * 3 { g.play_round(); }
         println!("3 temporadas {}", serde_json::to_string(&g).unwrap().len());
+    }
+}
+#[cfg(test)]
+mod penalties {
+    use super::*;
+    #[test]
+    fn penalties_rate_conversion_and_balance() {
+        let (mut goals, mut games, mut pens, mut pgoals, mut saved, mut wide) = (0u32, 0u32, 0usize, 0usize, 0usize, 0usize);
+        for seed in 1..6 { let mut g = Game::new(seed); for _ in 0..ROUNDS { for r in g.play_round() { goals += r.hg + r.ag; games += 1;
+            for (i, e) in r.events.iter().enumerate() {
+                if e.kind != "penalti" { continue; }
+                pens += 1;
+                assert!(e.text.starts_with("PÊNALTI para o "));
+                let next = &r.events[i + 1];
+                assert_eq!(next.minute, e.minute);
+                match next.kind.as_str() { "gol" => { assert!(next.text.contains("converte")); pgoals += 1 }
+                    "penalti_perdido" => if next.text.contains("defende") { saved += 1 } else { assert!(next.text.contains("para fora")); wide += 1 },
+                    k => panic!("evento inesperado após pênalti: {k}") }
+            } } } }
+        let per_team = pens as f64 / games as f64 / 2.0;
+        let conv = pgoals as f64 / pens as f64;
+        let gpg = goals as f64 / games as f64;
+        println!("gols/jogo {gpg:.3} pênaltis/time/jogo {per_team:.3} conversão {conv:.2} defesas {saved} fora {wide}");
+        assert!((0.18..0.33).contains(&per_team), "taxa de pênaltis {per_team}");
+        assert!((0.66..0.84).contains(&conv), "conversão {conv}");
+        assert!(saved > 0 && wide > 0);
+        assert!((2.3..2.9).contains(&gpg), "média de gols {gpg}");
+    }
+    #[test]
+    fn penalty_conversion_depends_on_taker_and_keeper() {
+        assert!((penalty_conversion(60.0, 60.0) - 0.75).abs() < 1e-9);
+        assert!(penalty_conversion(90.0, 30.0) > penalty_conversion(40.0, 80.0));
+        assert!(penalty_conversion(99.0, 5.0) <= 0.92 && penalty_conversion(5.0, 99.0) >= 0.55);
+    }
+    #[test]
+    fn matches_with_penalties_are_deterministic() {
+        let run = |seed| { let mut g = Game::new(seed); let mut v = vec![]; for _ in 0..10 { for r in g.play_round() { v.push((r.hg, r.ag, r.events.iter().map(|e| e.text.clone()).collect::<Vec<_>>())); } } v };
+        let a = run(42);
+        assert_eq!(a, run(42));
+        assert!(a.iter().any(|x| x.2.iter().any(|t| t.starts_with("PÊNALTI"))));
     }
 }

@@ -1,6 +1,8 @@
 import init, { FutManager } from '../pkg/futmanager.js';
 import { initWM, openWindow, closeWindow, getWindow, closeWhere } from './wm.js';
-import { openFinale, finaleOpen, renderLiveTable, renderHistory, isFinalStretch, chime } from './finale.js';
+import { openFinale, finaleOpen, renderLiveTable, renderHistory, isFinalStretch } from './finale.js';
+import { initSound, sfx, soundOn, setSound, getVolume, setVolume, played as soundLog, audioState } from './sound.js';
+initSound();
 import { initTeams, teamLink, playerLink, renderTeamsTab, previewHtml, onFieldHtml, openTeam, openPlayer, closeTeam, closePlayer, formHtml } from './teams.js';
 
 const SAVE_KEY = 'futmanager98_save'; // formato antigo (slot único)
@@ -340,6 +342,8 @@ function renderRound() {
     <p class="big" id="nextLabel">Próximo jogo: ${myGame ? `${esc(myGame.homeName)} x ${esc(myGame.awayName)}` : '—'}</p>
     <button id="btnPlay">▶ Jogar rodada</button> <button id="btnPreview" title="Escalação provável do adversário">🔎 Pré-jogo</button> <button id="btnHalf" class="hidden">▶ Iniciar 2º tempo</button>
     <button id="btnPause" class="hidden">⏸ Pausar</button> <button id="btnSkip" class="hidden">⏩ Pular para o fim</button>
+    &nbsp; <label title="Efeitos sonoros (apito, gols, cartões, pênaltis)"><input type="checkbox" id="sndOn" ${soundOn() ? 'checked' : ''}> 🔊 Som</label>
+    <input type="range" id="sndVol" min="0" max="100" value="${Math.round(getVolume() * 100)}" title="Volume" ${soundOn() ? '' : 'disabled'} style="width:80px;vertical-align:middle">
     &nbsp; Velocidade: <select id="speed">${Object.entries(SPEEDS).map(([k, v]) => `<option value="${k}" ${k === getSpeed() ? 'selected' : ''}>${v.label}</option>`).join('')}</select>
     <div><span class="clock" id="clock">00'</span> <span id="period" class="big"></span></div>
     <div class="cols"><div><table id="scoreboard"><tr><th>Mandante</th><th></th><th>Visitante</th><th>Público</th><th>Renda</th></tr>
@@ -354,12 +358,15 @@ function renderRound() {
   $('#btnPreview').disabled = !myGame || st.liveActive;
   if (myGame && !st.liveActive && previewRound !== st.season * 100 + st.round && window.innerWidth > 600) { previewRound = st.season * 100 + st.round; openPreview(); }
   $('#speed').onchange = (e) => { setSpeed(e.target.value); if (playing) startTimer(); };
-  $('#btnPlay').onclick = () => { game.start_round(); halftimeDone = false; lastGoals = 0; runLive(); };
+  $('#btnPlay').onclick = () => { game.start_round(); halftimeDone = false; seenEvents = 0; lastMinute = 0; runLive(); };
+  $('#sndOn').onchange = (e) => { setSound(e.target.checked); $('#sndVol').disabled = !e.target.checked; if (e.target.checked) sfx('virar'); };
+  $('#sndVol').oninput = (e) => setVolume(+e.target.value / 100);
+  $('#sndVol').onchange = () => sfx('cartao');
   if (st.liveActive) { halftimeDone = JSON.parse(game.live())[0]?.minute > 45; runLive(); }
 }
 
 let previewRound = -1;
-let liveTimer = null, paused = false, halftime = false, halftimeDone = false, lastGoals = 0;
+let liveTimer = null, paused = false, halftime = false, halftimeDone = false, seenEvents = 0, lastMinute = 0;
 function showLive(live) {
   const myId = st.managed.id;
   const myMatch = live.find((r) => r.home === myId || r.away === myId);
@@ -380,17 +387,24 @@ function showLive(live) {
   renderLiveTable(st, live);
   const of = document.getElementById('onfield');
   if (of && myMatch && minute > 0) { closeWindow('pre-jogo'); if ($('#btnPreview')) $('#btnPreview').disabled = true; of.innerHTML = onFieldHtml(myMatch); }
-  if (myMatch) { const g = myMatch.hg + myMatch.ag; if (g > lastGoals) chime('gol'); lastGoals = g; }
+  if (myMatch) {
+    if (lastMinute === 0 && minute >= 1) sfx('kickoff', getSpeed());
+    for (const e of myMatch.events.slice(seenEvents)) if (['gol', 'cartao', 'vermelho', 'penalti', 'penalti_perdido'].includes(e.kind)) sfx(e.kind, getSpeed());
+    seenEvents = myMatch.events.length;
+  }
+  lastMinute = minute;
   return minute;
 }
 function enterHalftime() {
   halftime = true;
+  sfx('halftime', getSpeed());
   clearInterval(liveTimer);
   $('#btnHalf').classList.remove('hidden'); $('#btnPause').classList.add('hidden');
   showLive(JSON.parse(game.live()));
 }
 function startSecondHalf() {
   halftime = false; halftimeDone = true;
+  sfx('secondhalf', getSpeed());
   $('#btnHalf').classList.add('hidden'); $('#btnPause').classList.remove('hidden');
   startTimer();
 }
@@ -421,6 +435,7 @@ function finishLive() {
   halftime = false;
   const results = JSON.parse(game.finish_round());
   playing = false;
+  sfx('final', getSpeed());
   const myMatch = results.find((r) => st.managed && (r.home === st.managed.id || r.away === st.managed.id));
   const att = myMatch ? `Público: ${myMatch.attendance.toLocaleString('pt-BR')} — Renda: ${money(myMatch.receipts)}` : '';
   st = JSON.parse(game.state());
@@ -632,16 +647,25 @@ if (location.search.includes('selftest')) (async () => {
     if ($('#pre-jogo')) throw 'pré-jogo deveria sumir durante o jogo';
     out.push('em_campo=ok');
 
+    if (!soundLog.includes('kickoff') || !soundLog.includes('halftime')) throw 'sons de início/intervalo: ' + soundLog;
     $('#btnHalf').click();
     if (!(await wait(() => !playing, 15000))) throw 'partida não terminou';
+    if (!soundLog.includes('secondhalf') || soundLog[soundLog.length - 1] !== 'final') throw 'sons de 2º tempo/final: ' + soundLog;
+    if (!$('#sndOn').checked) throw 'som deveria vir ligado por padrão';
+    $('#sndVol').value = '35'; $('#sndVol').oninput({ target: $('#sndVol') });
+    if (getVolume() !== 0.35) throw 'volume';
+    out.push('sons=ok');
     if (!($('#financas-rodada')?.textContent || '').includes('Saldo da rodada')) throw 'resumo da rodada';
     out.push('intervalo=ok');
     setSpeed('rapido');
     $('#btnPlay').click(); // volta à tela da rodada
     if ($('#speed').value !== 'rapido') throw 'velocidade';
     const t0 = Date.now();
+    soundLog.length = 0;
     $('#btnPlay').click();
     if (!(await wait(() => !playing, 8000))) throw 'rápido não terminou (parou no intervalo?)';
+    if (soundLog.some((k) => k !== 'gol' && k !== 'final') || !soundLog.includes('final')) throw 'sons no modo rápido: ' + soundLog;
+
     if (Date.now() - t0 > 5000) throw 'rápido lento demais';
     out.push('rapido=ok');
     setSpeed('normal');

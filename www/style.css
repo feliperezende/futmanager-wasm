@@ -168,3 +168,4 @@ body{padding-bottom:40px}
   .wm-title{cursor:default}
   #taskbar .tb-clock{display:none}#taskbar .tb-items button{max-width:110px}
 }
+.ticker .penalti{color:#f0f;font-weight:bold}.ticker .penalti_perdido{color:#f88}

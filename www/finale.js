@@ -5,24 +5,9 @@ const money = (v) => { const n = Math.round(v); return (n < 0 ? '−' : '') + 'R
 const DIV = (d) => `Divisão ${d + 1}`;
 const tl = (n) => n ? `<span class="tlink" data-tname="${esc(n)}" title="Ver ficha do clube">${esc(n)}</span>` : '—';
 
-// ---------------------------------------------------------------- som (opcional, desligado por padrão)
-const SOUND_KEY = 'futmanager98_pref_sound';
-export const soundOn = () => localStorage.getItem(SOUND_KEY) === '1';
-export const setSound = (v) => localStorage.setItem(SOUND_KEY, v ? '1' : '0');
-let actx = null;
-export function chime(kind) {
-  if (!soundOn()) return;
-  try {
-    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
-    const notes = { gol: [660, 880], festa: [523, 659, 784, 1047], triste: [392, 330, 262], virar: [700] }[kind] || [600];
-    notes.forEach((f, i) => {
-      const o = actx.createOscillator(), g = actx.createGain(), t = actx.currentTime + i * 0.13;
-      o.type = 'square'; o.frequency.value = f;
-      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.04, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
-      o.connect(g).connect(actx.destination); o.start(t); o.stop(t + 0.25);
-    });
-  } catch (e) { /* sem áudio */ }
-}
+import { soundOn, setSound, sfx } from './sound.js';
+export { soundOn, setSound };
+export const chime = (kind) => sfx(kind);
 
 // ---------------------------------------------------------------- tabela ao vivo
 /** Classificação provisória a partir da tabela antes da rodada + placares ao vivo. */
