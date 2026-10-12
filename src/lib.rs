@@ -81,6 +81,12 @@ pub struct Player {
 
 fn full() -> i32 { 100 }
 
+/// Recuperação entre rodadas: recupera 59%..69% do que falta para 100 (conforme a resistência).
+pub fn recover(energy: f64, stamina: i32) -> i32 {
+    let k = 0.5 + stamina.clamp(0, 99) as f64 / 500.0;
+    (energy + (100.0 - energy) * k).round().clamp(0.0, 100.0) as i32
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct Attrs { pub finishing: i32, pub passing: i32, pub tackling: i32, pub keeping: i32, pub stamina: i32 }
 
@@ -921,7 +927,7 @@ impl Game {
     pub fn start_round(&mut self) {
         if !self.live.is_empty() { return; }
         if self.round >= ROUNDS { self.end_season(); }
-        for p in self.players.iter_mut() { p.condition = (p.condition + 20).min(100); }
+
         self.news.clear();
         self.ai_transfers();
         for t in 0..self.teams.len() {
@@ -952,6 +958,7 @@ impl Game {
         let live = std::mem::take(&mut self.live);
         if live.is_empty() { return vec![]; }
         let fin_before = self.finance.clone();
+        let mut played_energy: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
         // suspensões cumpridas e recuperação de lesões
         for p in self.players.iter_mut() {
             if p.team.is_some() && p.suspended > 0 { p.suspended -= 1; }
@@ -967,7 +974,7 @@ impl Game {
             }
             for &(pl, n) in &m.reds { self.players[pl].suspended += n; }
             for &(pl, n) in &m.injuries { self.players[pl].injured = self.players[pl].injured.max(n); }
-            for (&id, &e) in &m.energy { self.players[id].condition = e.round() as i32; }
+            for (&id, &e) in &m.energy { played_energy.insert(id, e); }
             self.update_morale(&m);
             let r = MatchResult { division: m.division, home: m.home, away: m.away, hg: m.hg, ag: m.ag, attendance: m.attendance, events: m.events, receipts: m.receipts };
             self.apply_result(&r);
@@ -986,6 +993,10 @@ impl Game {
         self.advance_construction();
         self.pay_bank_installments();
         self.debt_consequences();
+        // recuperação física: quem jogou recupera boa parte do que perdeu; quem descansou volta a 100%
+        for p in self.players.iter_mut() {
+            p.condition = match played_energy.get(&p.id) { Some(&e) => recover(e, p.attrs.stamina), None => 100 };
+        }
         let f = &self.finance;
         let b = &fin_before;
         self.last_round = Finance { tickets: f.tickets - b.tickets, salaries: f.salaries - b.salaries, transfers_in: f.transfers_in - b.transfers_in,
@@ -1234,6 +1245,8 @@ impl Game {
         for p in self.players.iter_mut() { if p.team.is_some() && !p.academy && p.contract_until == 0 { p.contract_until = s + 1; } }
         let mut rng = Rng(self.rng.0 ^ 0xA77);
         for p in self.players.iter_mut() { if p.attrs == Attrs::default() { p.attrs = Attrs::generate(&mut rng, p.pos, p.skill); } }
+        // saves antigos: jogadores esgotados (0%) recebem uma recuperação imediata
+        for p in self.players.iter_mut() { if p.condition < 60 { p.condition = recover(p.condition as f64, p.attrs.stamina); } }
     }
 
     // ------------------------------------------------ JSON para a interface
@@ -1913,12 +1926,11 @@ mod tests {
         assert!(mine < 85.0, "energia média {mine}");
         let other: Vec<usize> = m.on[1 - side].iter().copied().filter(|&i| g.players[i].pos != Pos::G && !g.teams[if side == 0 { m.away } else { m.home }].pressing).collect();
         if !other.is_empty() { assert!(mine < avg(&other) + 2.0); }
+        let e = m.energy[&outfield[0]];
         g.finish_round();
         let p = outfield[0];
-        let c = g.players[p].condition;
-        assert!(c < 90);
-        g.start_round();
-        assert_eq!(g.players[p].condition, (c + 20).min(100));
+        assert_eq!(g.players[p].condition, recover(e, g.players[p].attrs.stamina), "recupera parte do desgaste");
+        assert!(g.players[p].condition > e as i32);
         // jogador cansado rende menos
         let full = g.role_value(p, g.players[p].pos, 100.0);
         assert!(g.role_value(p, g.players[p].pos, 30.0) < full * 0.85);
@@ -2082,7 +2094,41 @@ mod tests {
     }
 
     #[test]
+    fn same_xi_all_season_keeps_fitness() {
+        for (tactic, pressing, floor, avg_min, avg_max) in [("equilibrada", false, 60, 75.0, 92.0), ("ofensiva", true, 40, 60.0, 90.0)] {
+            let mut g = Game::new(141);
+            let t = 0;
+            g.managed = Some(t);
+            g.set_tactic(t, tactic, pressing).unwrap();
+            // XI fixo, incluindo o jogador de menor resistência
+            g.auto_lineup(t);
+            let xi = g.teams[t].lineup.clone();
+            let mut min_cond = 100;
+            let mut avg_end = 0.0;
+            for r in 0..ROUNDS - 1 {
+                for &id in &xi { g.players[id].injured = 0; g.players[id].suspended = 0; }
+                let f = g.teams[t].formation.clone();
+                g.set_lineup(t, &f, &xi).unwrap();
+                g.play_round();
+                if r >= 5 {
+                    for &id in &xi { if g.players[id].team == Some(t) { min_cond = min_cond.min(g.players[id].condition); } }
+                }
+                avg_end = xi.iter().map(|&id| g.players[id].condition as f64).sum::<f64>() / xi.len() as f64;
+            }
+            println!("{tactic}/pressão={pressing}: mínima {min_cond}, média final {avg_end:.1}");
+            assert!(min_cond >= floor, "{tactic}/{pressing}: condição mínima {min_cond}");
+            assert!(avg_end >= avg_min && avg_end <= avg_max, "{tactic}/{pressing}: média {avg_end}");
+        }
+        // save antigo com 0% se recupera ao carregar
+        let mut g = Game::new(142);
+        g.players[0].condition = 0;
+        g.normalize();
+        assert!(g.players[0].condition >= 55);
+    }
+
+    #[test]
     fn save_summary() {
+
 
 
 
