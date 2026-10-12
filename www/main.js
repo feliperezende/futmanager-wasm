@@ -1,4 +1,5 @@
 import init, { FutManager } from '../pkg/futmanager.js';
+import { initWM, openWindow, closeWindow, getWindow, closeWhere } from './wm.js';
 import { openFinale, finaleOpen, renderLiveTable, renderHistory, isFinalStretch, chime } from './finale.js';
 import { initTeams, teamLink, playerLink, renderTeamsTab, previewHtml, onFieldHtml, openTeam, openPlayer, closeTeam, closePlayer, formHtml } from './teams.js';
 
@@ -226,8 +227,9 @@ $('#slotsClose').onclick = () => $('#slots').classList.add('hidden');
 
 function enterGame() { $('#start').classList.add('hidden'); $('#main').classList.remove('hidden'); tab = 'clube'; refresh(); }
 $('#btnSave').onclick = () => showSlots('save');
-$('#btnQuit').onclick = () => { if (confirm('Voltar ao menu? Progresso não salvo será perdido.')) showStart(); };
-document.querySelectorAll('.menubar [data-tab]').forEach((b) => b.onclick = () => { if (!playing) { tab = b.dataset.tab; render(); } });
+$('#btnQuit').onclick = () => { if (confirm('Voltar ao menu? Progresso não salvo será perdido.')) { closeWhere(() => true); showStart(); } };
+initWM();
+document.querySelectorAll('.menubar [data-tab]').forEach((b) => b.onclick = () => { if (b.dataset.tab === 'historico') { openHistory(); return; } if (!playing) { tab = b.dataset.tab; render(); } });
 initTeams({ game: () => game, getState: () => st, refresh: () => { refresh(); }, flash, canAct: () => !playing });
 
 
@@ -252,13 +254,17 @@ function render() {
   document.querySelectorAll('.tab').forEach((s) => s.classList.add('hidden'));
   document.querySelectorAll('.menubar [data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
   $('#tab-' + tab).classList.remove('hidden');
-  ({ clube: renderClub, jogos: renderRound, tabela: renderTable, mercado: renderMarket, base: renderAcademy, financas: renderFinance, historico: renderHistoryTab, times: () => renderTeamsTab(st, $('#tab-times')) })[tab]();
+  ({ clube: renderClub, jogos: renderRound, tabela: renderTable, mercado: renderMarket, base: renderAcademy, financas: renderFinance, times: () => renderTeamsTab(st, $('#tab-times')) })[tab]();
   if (st.reportPending && !playing) showFinale();
 }
-function renderHistoryTab() { renderHistory(st, $('#tab-historico'), () => openFinale(st.report, st, () => {})); }
+function openHistory() {
+  const w = openWindow({ key: 'historico', id: 'historico', title: 'Histórico — galeria de campeões', width: 920 });
+  renderHistory(st, w.body, () => openFinale(st.report, st, () => {}));
+}
+function refreshHistory() { if (getWindow('historico')) openHistory(); }
 function showFinale() {
   if (finaleOpen() || !st.report) return;
-  openFinale(st.report, st, () => { game.ack_report(); st = JSON.parse(game.state()); autosave(); render(); });
+  openFinale(st.report, st, () => { game.ack_report(); st = JSON.parse(game.state()); autosave(); render(); refreshHistory(); });
 }
 
 function moraleIcon(v) { return (v >= 70 ? '😃' : v >= 45 ? '🙂' : v >= 25 ? '😐' : '😠') + ' ' + v; }
@@ -332,20 +338,27 @@ function renderRound() {
   $('#tab-jogos').innerHTML = `
     <div>${st.news.map((n) => `<div>📰 ${esc(n)}</div>`).join('')}</div>
     <p class="big" id="nextLabel">Próximo jogo: ${myGame ? `${esc(myGame.homeName)} x ${esc(myGame.awayName)}` : '—'}</p>
-    <button id="btnPlay">▶ Jogar rodada</button> <button id="btnHalf" class="hidden">▶ Iniciar 2º tempo</button>
+    <button id="btnPlay">▶ Jogar rodada</button> <button id="btnPreview" title="Escalação provável do adversário">🔎 Pré-jogo</button> <button id="btnHalf" class="hidden">▶ Iniciar 2º tempo</button>
     <button id="btnPause" class="hidden">⏸ Pausar</button> <button id="btnSkip" class="hidden">⏩ Pular para o fim</button>
     &nbsp; Velocidade: <select id="speed">${Object.entries(SPEEDS).map(([k, v]) => `<option value="${k}" ${k === getSpeed() ? 'selected' : ''}>${v.label}</option>`).join('')}</select>
     <div><span class="clock" id="clock">00'</span> <span id="period" class="big"></span></div>
     <div class="cols"><div><table id="scoreboard"><tr><th>Mandante</th><th></th><th>Visitante</th><th>Público</th><th>Renda</th></tr>
       ${mine.map((x) => `<tr class="${x === myGame ? 'me' : ''}"><td>${teamLink(x.home, x.homeName)}</td><td id="sc-${x.home}">- x -</td><td>${teamLink(x.away, x.awayName)}</td><td id="pub-${x.home}">—</td><td id="renda-${x.home}">—</td></tr>`).join('')}
-    </table><div id="subs"></div><div id="roundSummary"></div></div><div>${isFinalStretch(st) ? '<div id="liveTable"></div>' : ''}<div class="ticker" id="ticker">Aguardando o apito inicial...</div></div></div>
-    <div id="preview">${st.round < st.rounds ? previewHtml(game, m.id, myGame ? (myGame.home === m.id ? myGame.away : myGame.home) : null) : ''}</div><div id="onfield"></div>`;
+    </table><div id="subs"></div></div><div>${isFinalStretch(st) ? '<div id="liveTable"></div>' : ''}<div class="ticker" id="ticker">Aguardando o apito inicial...</div></div></div>
+    <div id="onfield"></div>`;
   renderLiveTable(st, []);
+  const oppId = myGame ? (myGame.home === m.id ? myGame.away : myGame.home) : null;
+  const openPreview = () => openWindow({ key: 'pre-jogo', id: 'pre-jogo', title: `Pré-jogo — ${myGame ? myGame.homeName + ' x ' + myGame.awayName : ''}`, width: 860,
+    x: Math.max(8, window.innerWidth - 880), y: window.scrollY + 230, html: previewHtml(game, m.id, oppId) });
+  $('#btnPreview').onclick = openPreview;
+  $('#btnPreview').disabled = !myGame || st.liveActive;
+  if (myGame && !st.liveActive && previewRound !== st.season * 100 + st.round && window.innerWidth > 600) { previewRound = st.season * 100 + st.round; openPreview(); }
   $('#speed').onchange = (e) => { setSpeed(e.target.value); if (playing) startTimer(); };
   $('#btnPlay').onclick = () => { game.start_round(); halftimeDone = false; lastGoals = 0; runLive(); };
   if (st.liveActive) { halftimeDone = JSON.parse(game.live())[0]?.minute > 45; runLive(); }
 }
 
+let previewRound = -1;
 let liveTimer = null, paused = false, halftime = false, halftimeDone = false, lastGoals = 0;
 function showLive(live) {
   const myId = st.managed.id;
@@ -366,7 +379,7 @@ function showLive(live) {
   if (typeof renderSubs === 'function') renderSubs(myMatch);
   renderLiveTable(st, live);
   const of = document.getElementById('onfield');
-  if (of && myMatch && minute > 0) { const pv = document.getElementById('preview'); if (pv) pv.innerHTML = ''; of.innerHTML = onFieldHtml(myMatch); }
+  if (of && myMatch && minute > 0) { closeWindow('pre-jogo'); if ($('#btnPreview')) $('#btnPreview').disabled = true; of.innerHTML = onFieldHtml(myMatch); }
   if (myMatch) { const g = myMatch.hg + myMatch.ag; if (g > lastGoals) chime('gol'); lastGoals = g; }
   return minute;
 }
@@ -429,12 +442,12 @@ function renderRoundSummary(f, myMatch) {
   const income = f.tickets + f.tv + f.transfers_in + f.prizes + f.bank_in + Math.max(0, f.loan_fees);
   const costs = f.salaries + f.upkeep + f.investments + f.transfers_out + f.bank_paid + Math.max(0, -f.loan_fees);
   const row = (l, v, neg) => v ? `<tr><td>${l}</td><td class="n" style="${neg ? 'color:#a00' : ''}">${money(neg ? -v : v)}</td></tr>` : '';
-  $('#roundSummary').innerHTML = `<fieldset><legend>Finanças da rodada — ${esc(st.managed.name)}</legend><table>
+  openWindow({ key: 'financas-rodada', id: 'financas-rodada', title: `Finanças da rodada ${st.round || st.rounds} — ${st.managed.name}`, width: 400, x: Math.max(8, window.innerWidth - 430), y: window.scrollY + 90, html: `<table class="round-fin">
     ${row(isHome ? `Bilheteria (${myMatch.attendance.toLocaleString('pt-BR')} pagantes)` : 'Bilheteria', f.tickets) || `<tr><td>Bilheteria</td><td style="text-align:right">${isHome ? money(0) : 'jogo fora de casa'}</td></tr>`}
     ${row('Cotas de TV/patrocínio', f.tv)}${row('Prêmios', f.prizes)}${row('Vendas de jogadores', f.transfers_in)}${row('Empréstimo bancário recebido', f.bank_in)}
     ${row('Salários', f.salaries, true)}${row('Manutenção/juros', f.upkeep, true)}${row('Investimentos', f.investments, true)}${row('Compras de jogadores', f.transfers_out, true)}${row('Parcelas do banco', f.bank_paid, true)}
     <tr><td><b>Saldo da rodada</b></td><td style="text-align:right"><b style="color:${income - costs >= 0 ? '#060' : '#a00'}">${money(income - costs)}</b></td></tr>
-  </table></fieldset>`;
+  </table>` });
 }
 function setStatus() {
   const m = st.managed;
@@ -570,31 +583,40 @@ if (location.search.includes('selftest')) (async () => {
     tab = 'jogos'; render();
     if ($('#speed').value !== 'normal') throw 'velocidade não persistida';
     // pré-jogo: escalação provável do adversário
-    const boxes = document.querySelectorAll('#preview .xi-box');
+    const boxes = document.querySelectorAll('#pre-jogo .xi-box');
     if (boxes.length !== 2 || !boxes[1].textContent.includes('Próximo adversário')) throw 'pré-jogo do adversário';
     if (boxes[1].querySelectorAll('tr').length !== 12) throw 'XI provável do adversário';
     if (!boxes[1].querySelector('.form') && !boxes[1].textContent.includes('Forma')) throw 'forma do adversário';
     boxes[1].querySelector('.tlink').click();
-    if ($('#teamview').classList.contains('hidden')) throw 'ficha do adversário';
-    const nSquad = document.querySelectorAll('#teamview .sortable tr').length - 1;
+    if (!$('.wm-team')) throw 'ficha do adversário';
+    const nSquad = document.querySelectorAll('.wm-team .sortable tr').length - 1;
     if (nSquad < 16) throw 'elenco na ficha: ' + nSquad;
-    document.querySelector('#teamview [data-sort="skill"]').click();
-    const sk = [...document.querySelectorAll('#teamview .sortable tr')].slice(1).map((r) => +r.children[2].textContent);
+    document.querySelector('.wm-team [data-sort="skill"]').click();
+    const sk = [...document.querySelectorAll('.wm-team .sortable tr')].slice(1).map((r) => +r.children[2].textContent);
     if (sk.some((v, i) => i && v > sk[i - 1])) throw 'ordenação por habilidade';
-    if (!document.querySelector('#teamview [data-tvbuy]') || !document.querySelector('#teamview [data-tvloan]')) throw 'ações de mercado na ficha';
-    document.querySelector('#teamview .plink').click();
-    if ($('#playercard').classList.contains('hidden') || !$('#playercard').textContent.includes('Finalização')) throw 'cartão do jogador';
+    if (!document.querySelector('.wm-team [data-tvbuy]') || !document.querySelector('.wm-team [data-tvloan]')) throw 'ações de mercado na ficha';
+    document.querySelector('.wm-team .plink').click();
+    if (!$('.wm-player') || !$('.wm-player').textContent.includes('Finalização')) throw 'cartão do jogador';
+    openTeam(st.managed.id);
+    if (document.querySelectorAll('.wm-team').length !== 2) throw 'duas fichas abertas';
+    const wa = document.querySelectorAll('.wm-team')[0];
+    wa.querySelector('.wm-min').click();
+    if (!wa.classList.contains('wm-min-state') || !document.querySelector('#taskbar [data-wkey^="team-"]')) throw 'minimizar';
+    document.querySelector(`#taskbar [data-wkey="team-${wa.dataset.teamId}"]`).click();
+    if (wa.classList.contains('wm-min-state') || !wa.classList.contains('wm-active')) throw 'restaurar';
     closePlayer(); closeTeam();
+    if (document.querySelector('.wm-team')) throw 'fechar janelas';
     out.push('adversario=ok');
+    out.push('janelas=ok');
     tab = 'times'; render();
     if (document.querySelectorAll('#tab-times .team-card').length !== 16) throw 'aba times';
     $('#teamsDiv').value = '0'; $('#teamsDiv').onchange({ target: $('#teamsDiv') });
     document.querySelectorAll('#tab-times .team-card')[3].click();
-    if ($('#teamview').classList.contains('hidden') || !$('#teamview').textContent.includes('1ª')) throw 'ficha pela aba times';
+    if (!$('.wm-team') || !$('.wm-team').textContent.includes('1ª')) throw 'ficha pela aba times';
     closeTeam();
     tab = 'tabela'; render();
     document.querySelector('#tab-tabela .tlink').click();
-    if ($('#teamview').classList.contains('hidden')) throw 'ficha pela classificação';
+    if (!$('.wm-team')) throw 'ficha pela classificação';
     closeTeam();
     out.push('times=ok');
     tab = 'jogos'; render();
@@ -607,12 +629,12 @@ if (location.search.includes('selftest')) (async () => {
     if ([...document.querySelectorAll('[id^="renda-"]')].some((c) => !c.textContent.startsWith('R$'))) throw 'renda não exibida';
     const ofb = document.querySelectorAll('#onfield .onfield');
     if (ofb.length !== 2 || [...ofb].some((b) => b.querySelectorAll('tr').length < 10) || !$('#onfield .small-meter')) throw 'jogadores em campo';
-    if ($('#preview').innerHTML !== '') throw 'pré-jogo deveria sumir durante o jogo';
+    if ($('#pre-jogo')) throw 'pré-jogo deveria sumir durante o jogo';
     out.push('em_campo=ok');
 
     $('#btnHalf').click();
     if (!(await wait(() => !playing, 15000))) throw 'partida não terminou';
-    if (!$('#roundSummary').textContent.includes('Saldo da rodada')) throw 'resumo da rodada';
+    if (!($('#financas-rodada')?.textContent || '').includes('Saldo da rodada')) throw 'resumo da rodada';
     out.push('intervalo=ok');
     setSpeed('rapido');
     $('#btnPlay').click(); // volta à tela da rodada
@@ -694,11 +716,11 @@ if (location.search.includes('selftest')) (async () => {
     await wait(() => JSON.parse(game.live())[0]?.minute >= 20, 5000);
     if (document.querySelectorAll('#liveTable tr').length < 17) throw 'linhas da tabela ao vivo';
     out.push('reta_final=ok');
-    if (!(await wait(() => !$('#finale').classList.contains('hidden'), 10000))) throw 'encerramento não abriu';
+    if (!(await wait(() => !!$('#finale'), 10000))) throw 'encerramento não abriu';
     const seen = [];
-    for (let k = 0; k < 10 && !$('#finale').classList.contains('hidden'); k++) {
-      seen.push($('#finale .finale-win').dataset.page);
-      if (k === 1) { $('#finPrev').click(); if ($('#finale .finale-win').dataset.page !== seen[0]) throw 'anterior'; $('#finNext').click(); }
+    for (let k = 0; k < 10 && !!$('#finale'); k++) {
+      seen.push($('#finale').dataset.page);
+      if (k === 1) { $('#finPrev').click(); if ($('#finale').dataset.page !== seen[0]) throw 'anterior'; $('#finNext').click(); }
       $('#finNext').click();
     }
     if (seen.join(',') !== 'campeao,acesso,premios,temporada,proxima') throw 'páginas do encerramento: ' + seen;
@@ -706,12 +728,12 @@ if (location.search.includes('selftest')) (async () => {
     if (s2.reportPending) throw 'encerramento não confirmado';
     if (s2.history.length !== 1 || s2.history[0].champions.length !== 4) throw 'histórico';
     out.push('encerramento=' + seen.length + 'p');
-    tab = 'historico'; render();
-    if (!$('#tab-historico').textContent.includes('Galeria de campeões')) throw 'aba histórico';
+    openHistory();
+    if (!$('#historico').textContent.includes('Galeria de campeões')) throw 'aba histórico';
     $('#btnReopen').click();
-    if ($('#finale').classList.contains('hidden')) throw 'rever encerramento';
+    if (!$('#finale')) throw 'rever encerramento';
     $('#finSkipBtn').click();
-    if (!$('#finale').classList.contains('hidden')) throw 'pular';
+    if (!!$('#finale')) throw 'pular';
     out.push('historico=ok');
     setSpeed('normal');
     out.push('temporada=' + s2.season);

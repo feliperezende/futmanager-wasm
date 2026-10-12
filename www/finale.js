@@ -1,3 +1,4 @@
+import { openWindow } from './wm.js';
 // Encerramento de temporada, tabela "se terminasse agora" e Histórico.
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const money = (v) => { const n = Math.round(v); return (n < 0 ? '−' : '') + 'R$ ' + Math.abs(n).toLocaleString('pt-BR'); };
@@ -201,30 +202,30 @@ function pages(r, st) {
 
 let open = false;
 export const finaleOpen = () => open;
-/** Abre o encerramento paginado. onClose é chamado ao concluir/pular. */
+/** Abre o encerramento paginado numa janela própria. onClose é chamado ao concluir/pular/fechar. */
 export function openFinale(r, st, onClose) {
   if (!r || open) return;
   open = true;
   const P = pages(r, st);
-  let i = 0;
-  const modal = document.getElementById('finale');
-  modal.classList.remove('hidden');
-  const close = () => { open = false; modal.classList.add('hidden'); onClose && onClose(); };
+  let i = 0, done = false;
+  const w = openWindow({ key: 'finale', id: 'finale', width: 780, className: 'finale-win', x: Math.max(8, (window.innerWidth - 780) / 2),
+    onClose: () => { open = false; if (!done) { done = true; onClose && onClose(); } } });
+  const close = () => w.close();
   const show = () => {
     const p = P[i];
-    modal.innerHTML = `<div class="window finale-win" data-page="${p.key}"><div class="titlebar"><span>Fim da temporada ${r.season} — ${p.title}</span><span><button id="finSkip" title="Pular encerramento">X</button></span></div>
-      <div class="panel finale-body">${p.html}</div>
+    w.el.dataset.page = p.key;
+    w.setTitle(`Fim da temporada ${r.season} — ${p.title.replace(/<[^>]+>/g, '')}`);
+    w.body.innerHTML = `<div class="finale-body">${p.html}</div>
       <div class="finale-nav"><span class="dots">${P.map((_, k) => `<span class="${k === i ? 'on' : ''}">●</span>`).join(' ')} &nbsp;Página ${i + 1}/${P.length}</span>
         <label title="Efeitos sonoros discretos"><input type="checkbox" id="finSound" ${soundOn() ? 'checked' : ''}> Som</label>
         <button id="finPrev" ${i === 0 ? 'disabled' : ''}>◀ Anterior</button>
         <button id="finNext">${i === P.length - 1 ? 'Concluir ✔' : 'Próximo ▶'}</button>
-        <button id="finSkipBtn">Pular</button></div></div>`;
-    modal.querySelector('#finPrev').onclick = () => { if (i > 0) { i--; chime('virar'); show(); } };
-    modal.querySelector('#finNext').onclick = () => { if (i < P.length - 1) { i++; chime('virar'); show(); } else close(); };
-    modal.querySelector('#finSkip').onclick = close;
-    modal.querySelector('#finSkipBtn').onclick = close;
-    modal.querySelector('#finSound').onchange = (e) => { setSound(e.target.checked); if (e.target.checked) chime('virar'); };
-    if (p.party) confetti(modal.querySelector('.finale-win'));
+        <button id="finSkipBtn">Pular</button></div>`;
+    w.body.querySelector('#finPrev').onclick = () => { if (i > 0) { i--; chime('virar'); show(); } };
+    w.body.querySelector('#finNext').onclick = () => { if (i < P.length - 1) { i++; chime('virar'); show(); } else close(); };
+    w.body.querySelector('#finSkipBtn').onclick = close;
+    w.body.querySelector('#finSound').onchange = (e) => { setSound(e.target.checked); if (e.target.checked) chime('virar'); };
+    if (p.party) confetti(w.el);
     if (p.sound) chime(p.sound);
   };
   show();

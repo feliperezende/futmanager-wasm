@@ -1,6 +1,7 @@
 // Ficha do clube, cartão do jogador, pré-jogo do adversário e jogadores em campo.
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const money = (v) => { const n = Math.round(v); return (n < 0 ? '−' : '') + 'R$ ' + Math.abs(n).toLocaleString('pt-BR'); };
+import { openWindow, closeWhere } from './wm.js';
 const ORDER = { G: 0, D: 1, M: 2, A: 3 };
 
 /** Nome de clube clicável (abre a ficha). */
@@ -33,15 +34,8 @@ export function initTeams(c) {
   });
 }
 
-function modal(id) {
-  let m = document.getElementById(id);
-  if (!m) { m = document.createElement('div'); m.id = id; m.className = 'modal hidden'; document.body.appendChild(m); }
-  m.classList.remove('hidden');
-  m.onclick = (e) => { if (e.target === m) m.classList.add('hidden'); };
-  return m;
-}
-export const closeTeam = () => document.getElementById('teamview')?.classList.add('hidden');
-export const closePlayer = () => document.getElementById('playercard')?.classList.add('hidden');
+export const closeTeam = () => closeWhere((k) => k.startsWith('team-'));
+export const closePlayer = () => closeWhere((k) => k.startsWith('player-'));
 
 // ---------------------------------------------------------------- ficha do clube
 const COLS = [
@@ -63,15 +57,15 @@ export function teamInfoHtml(t) {
 export function openTeam(id) {
   const t = JSON.parse(ctx.game().team(id));
   if (!t) return;
-  const st = ctx.getState();
-  const m = modal('teamview');
+  const w = openWindow({ key: 'team-' + id, id: 'team-' + id, title: `Ficha do clube — ${t.name}${t.managed ? ' (seu clube)' : ''}`, width: 980, className: 'wm-team teamview' });
+  w.el.dataset.teamId = t.id;
+  const m = w.body;
   const draw = () => {
     const col = COLS.find((c) => c[0] === sortKey);
     const squad = [...t.squad].sort((a, b) => { const x = col[2](a), y = col[2](b); return (x < y ? -1 : x > y ? 1 : 0) * sortDir || ORDER[a.pos] - ORDER[b.pos] || b.skill - a.skill; });
     const inXI = new Set(t.lineup.map((p) => p.id));
     const act = !t.managed && ctx.canAct();
-    m.innerHTML = `<div class="window teamview" data-team-id="${t.id}"><div class="titlebar"><span>Ficha do clube — ${esc(t.name)}${t.managed ? ' (seu clube)' : ''}</span><span><button id="tvClose">X</button></span></div>
-      <div class="panel"><div class="cols"><div>${teamInfoHtml(t)}</div>
+    m.innerHTML = `<div class="cols"><div>${teamInfoHtml(t)}</div>
       <div><table><tr><th colspan="3">Artilheiros do clube</th></tr>${t.scorers.length ? t.scorers.map((p) => `<tr><td>${playerLink(p.id, p.name)}</td><td>${p.pos}</td><td class="n">${p.goals}</td></tr>`).join('') : '<tr><td colspan="3" class="small">Nenhum gol ainda.</td></tr>'}</table>
       ${t.unavailable.length ? `<p class="small">Desfalques: ${t.unavailable.map((p) => esc(p.name) + flags(p)).join(', ')}</p>` : ''}</div></div>
       <div class="list"><table class="sortable"><tr>${COLS.map(([k, l]) => `<th data-sort="${k}" title="Ordenar por ${l}">${l}${k === sortKey ? (sortDir > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('')}<th>Preço</th><th></th></tr>
@@ -79,14 +73,12 @@ export function openTeam(id) {
         <td><small>${p.attrs.finishing}/${p.attrs.passing}/${p.attrs.tackling}/${p.attrs.keeping}/${p.attrs.stamina}</small></td><td>${cond(p.condition)}</td><td>${p.age}</td><td>${money(p.salary)}</td><td>${money(p.value)}</td><td>${p.goals}</td><td>${moraleIcon(p.morale)}</td>
         <td>${p.loanFrom ? `<small>emprestado (${esc(p.loanFrom)})</small>` : 'até T' + p.contractUntil}</td><td>${t.managed ? '—' : money(p.buyPrice)}</td>
         <td class="nowrap">${act && !p.loanFrom ? `<button data-tvbuy="${p.id}" title="Comprar por ${money(p.buyPrice)}">Comprar</button> <button data-tvloan="${p.id}" title="Empréstimo até o fim da temporada: ${money(p.loanFee)}">Emprestar</button>` : ''}</td></tr>`).join('')}
-      </table></div><small>★ titular provável · clique no cabeçalho para ordenar · clique no nome para ver o cartão do jogador</small></div></div>`;
-    m.querySelector('#tvClose').onclick = closeTeam;
+      </table></div><small>★ titular provável · clique no cabeçalho para ordenar · clique no nome para ver o cartão do jogador</small>`;
     m.querySelectorAll('[data-sort]').forEach((h) => h.onclick = () => { if (sortKey === h.dataset.sort) sortDir = -sortDir; else { sortKey = h.dataset.sort; sortDir = ['skill', 'value', 'goals', 'salary', 'condition', 'morale'].includes(sortKey) ? -1 : 1; } draw(); });
-    const doAct = (fn, pid) => { const r = JSON.parse(fn(pid)); ctx.flash(r); ctx.refresh(); if (r.ok) { closeTeam(); } };
+    const doAct = (fn, pid) => { const r = JSON.parse(fn(pid)); ctx.flash(r); ctx.refresh(); if (r.ok) { w.close(); } };
     m.querySelectorAll('[data-tvbuy]').forEach((b) => b.onclick = () => { if (confirm('Comprar este jogador?')) doAct((x) => ctx.game().buy(x), +b.dataset.tvbuy); });
     m.querySelectorAll('[data-tvloan]').forEach((b) => b.onclick = () => doAct((x) => ctx.game().loan_in(x), +b.dataset.tvloan));
   };
-  void st;
   draw();
 }
 
@@ -94,20 +86,18 @@ export function openTeam(id) {
 export function openPlayer(id) {
   const p = JSON.parse(ctx.game().player(id));
   if (!p) return;
-  const m = modal('playercard');
+  const w = openWindow({ key: 'player-' + id, id: 'player-' + id, title: `Jogador — ${p.name}`, width: 380, className: 'wm-player playercard' });
+  const m = w.body;
   const bar = (l, v) => `<tr><td>${l}</td><td class="n">${v}</td><td><div class="meter small-meter"><div style="width:${v}%"></div></div></td></tr>`;
   const act = !p.mine && !p.academy && !p.loanFrom && ctx.canAct();
-  m.innerHTML = `<div class="window playercard"><div class="titlebar"><span>Jogador — ${esc(p.name)}</span><span><button id="pcClose">X</button></span></div><div class="panel">
-    <div class="pc-head"><span class="pc-pos pos-${p.pos}">${p.pos}</span><div><b>${esc(p.name)}</b>${flags(p)}<br>${p.age} anos · ${p.team !== null ? teamLink(p.team, p.teamName) : 'Sem clube'}${p.academy ? ' (base)' : ''}</div><div class="pc-skill">${p.skill}</div></div>
+  m.innerHTML = `<div class="pc-head"><span class="pc-pos pos-${p.pos}">${p.pos}</span><div><b>${esc(p.name)}</b>${flags(p)}<br>${p.age} anos · ${p.team !== null ? teamLink(p.team, p.teamName) : 'Sem clube'}${p.academy ? ' (base)' : ''}</div><div class="pc-skill">${p.skill}</div></div>
     <table>${bar('Finalização', p.attrs.finishing)}${bar('Passe', p.attrs.passing)}${bar('Marcação', p.attrs.tackling)}${bar('Goleiro', p.attrs.keeping)}${bar('Resistência', p.attrs.stamina)}</table>
     <table class="kv"><tr><td>Físico / moral</td><td>${cond(p.condition)} · ${moraleIcon(p.morale)}</td></tr>
       <tr><td>Gols na temporada</td><td>${p.goals}</td></tr>
       <tr><td>Contrato</td><td>${p.loanFrom ? 'emprestado pelo ' + esc(p.loanFrom) : p.contractUntil ? 'até a temporada ' + p.contractUntil : '—'} · ${money(p.salary)}/rod.</td></tr>
       <tr><td>Valor de mercado</td><td>${money(p.value)}${act ? ` · preço ${money(p.buyPrice)}` : ''}</td></tr></table>
-    ${act ? `<button id="pcBuy">Comprar (${money(p.buyPrice)})</button> ${p.team !== null ? `<button id="pcLoan">Empréstimo (${money(p.loanFee)})</button>` : ''}` : ''}
-    </div></div>`;
-  m.querySelector('#pcClose').onclick = closePlayer;
-  const doAct = (r) => { r = JSON.parse(r); ctx.flash(r); ctx.refresh(); if (r.ok) { closePlayer(); closeTeam(); } };
+    ${act ? `<button id="pcBuy">Comprar (${money(p.buyPrice)})</button> ${p.team !== null ? `<button id="pcLoan">Empréstimo (${money(p.loanFee)})</button>` : ''}` : ''}`;
+  const doAct = (r) => { r = JSON.parse(r); ctx.flash(r); ctx.refresh(); if (r.ok) { w.close(); closeTeam(); } };
   const b = m.querySelector('#pcBuy'); if (b) b.onclick = () => { if (confirm('Comprar este jogador?')) doAct(ctx.game().buy(id)); };
   const l = m.querySelector('#pcLoan'); if (l) l.onclick = () => doAct(ctx.game().loan_in(id));
 }
