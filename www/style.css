@@ -139,3 +139,10 @@ tr.xi td{background:#f2f2ff}
 #teamview,#playercard{z-index:20}#playercard{z-index:30}
 @media (max-width:640px){.teamview,.playercard{width:96vw}.cols2>*{flex-basis:100%}.team-grid{grid-template-columns:1fr 1fr}}
 .teamview .sortable td:nth-child(2){white-space:nowrap}.nowrap{white-space:nowrap}.teamview .sortable button{padding:1px 4px;min-width:0}
+
+/* ---- Fundo: estádio ao entardecer ---- */
+html{background:#1b2a3a}
+body{background:#1b2a3a url(img/estadio.jpg) center/cover no-repeat fixed;background-image:image-set(url(img/estadio.webp) type("image/webp"),url(img/estadio.jpg) type("image/jpeg"));image-rendering:pixelated;min-height:100vh;box-sizing:border-box}
+.window{background:#c0c0c0;box-shadow:inset -1px -1px #0a0a0a,inset 1px 1px #fff,inset -2px -2px #808080,inset 2px 2px #dfdfdf,4px 4px 0 rgba(0,0,0,.45)}
+#app .panel,#app .tab{image-rendering:auto}
+@media (max-width:640px){body{background-attachment:scroll;background-size:cover}}

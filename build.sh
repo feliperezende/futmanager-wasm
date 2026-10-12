@@ -18,7 +18,7 @@ wasm-pack build --target web --release
 
 rm -rf dist
 mkdir -p dist/www dist/pkg
-cp www/* dist/www/
+cp -r www/. dist/www/
 cp pkg/futmanager.js pkg/futmanager_bg.wasm dist/pkg/
 cat > dist/index.html <<'HTML'
 <!DOCTYPE html><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=www/"><a href="www/">FutManager 98</a>
