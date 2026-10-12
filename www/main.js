@@ -1,5 +1,6 @@
 import init, { FutManager } from '../pkg/futmanager.js';
 import { initDesktop, openAbout } from './desktop.js';
+import { openCup, openDraw, animateShootout } from './cup.js';
 import { initWM, openWindow, closeWindow, getWindow, closeWhere, tbtn, manageMain } from './wm.js';
 import { openFinale, finaleOpen, renderLiveTable, renderHistory, isFinalStretch } from './finale.js';
 import { initSound, sfx, soundOn, setSound, getVolume, setVolume, played as soundLog, audioState } from './sound.js';
@@ -236,7 +237,7 @@ initWM();
 $('#mainBtns').innerHTML = tbtn('min', 'wm-min') + tbtn('max', 'wm-max') + tbtn('close', 'wm-close', true);
 const mainWin = manageMain($('#app'), '⚽ FutManager 98');
 let gameVersion = '';
-document.querySelectorAll('.menubar [data-tab]').forEach((b) => b.onclick = () => { if (b.dataset.tab === 'historico') { openHistory(); return; } if (!playing) { tab = b.dataset.tab; render(); } });
+document.querySelectorAll('.menubar [data-tab]').forEach((b) => b.onclick = () => { if (b.dataset.tab === 'historico') { openHistory(); return; } if (b.dataset.tab === 'copa') { openCup(st); return; } if (!playing) { tab = b.dataset.tab; render(); } });
 initTeams({ game: () => game, getState: () => st, refresh: () => { refresh(); }, flash, canAct: () => !playing });
 
 
@@ -263,6 +264,11 @@ function render() {
   $('#tab-' + tab).classList.remove('hidden');
   ({ clube: renderClub, jogos: renderRound, tabela: renderTable, mercado: renderMarket, base: renderAcademy, financas: renderFinance, times: () => renderTeamsTab(st, $('#tab-times')) })[tab]();
   if (st.reportPending && !playing) showFinale();
+  else if (st.cup && st.cup.drawPending && !playing) showDraw();
+}
+function showDraw() {
+  if (getWindow('sorteio') || finaleOpen()) return;
+  openDraw(st, () => { game.ack_cup_draw(); st = JSON.parse(game.state()); });
 }
 function openHistory() {
   const w = openWindow({ key: 'historico', id: 'historico', title: 'Histórico — galeria de campeões', width: 920 });
@@ -340,12 +346,13 @@ const setSpeed = (s) => localStorage.setItem('futmanager98_pref_speed', s);
 
 function renderRound() {
   const m = st.managed;
-  const mine = st.next.filter((x) => x.division === m.division);
+  const cupDay = st.dayType === 'cup';
+  const mine = cupDay ? st.next : st.next.filter((x) => x.division === m.division);
   const myGame = mine.find((x) => x.home === m.id || x.away === m.id);
   $('#tab-jogos').innerHTML = `
     <div>${st.news.map((n) => `<div>📰 ${esc(n)}</div>`).join('')}</div>
-    <p class="big" id="nextLabel">Próximo jogo: ${myGame ? `${esc(myGame.homeName)} x ${esc(myGame.awayName)}` : '—'}</p>
-    <button id="btnPlay">▶ Jogar rodada</button> <button id="btnPreview" title="Escalação provável do adversário">🔎 Pré-jogo</button> <button id="btnHalf" class="hidden">▶ Iniciar 2º tempo</button>
+    <p class="big" id="nextLabel">${cupDay ? `<span class="daytag">COPA NACIONAL</span> ${esc(st.cupRoundName)} — ` : ''}Próximo jogo: ${myGame ? `${esc(myGame.homeName)} x ${esc(myGame.awayName)}` : '—'}</p>
+    <button id="btnPlay">${cupDay ? '▶ Jogar Copa' : '▶ Jogar rodada'}</button> <button id="btnPreview" title="Escalação provável do adversário">🔎 Pré-jogo</button> <button id="btnHalf" class="hidden">▶ Iniciar 2º tempo</button>
     <button id="btnPause" class="hidden">⏸ Pausar</button> <button id="btnSkip" class="hidden">⏩ Pular para o fim</button>
     &nbsp; <label title="Efeitos sonoros (apito, gols, cartões, pênaltis)"><input type="checkbox" id="sndOn" ${soundOn() ? 'checked' : ''}> 🔊 Som</label>
     <input type="range" id="sndVol" min="0" max="100" value="${Math.round(getVolume() * 100)}" title="Volume" ${soundOn() ? '' : 'disabled'} style="width:80px;vertical-align:middle">
@@ -363,7 +370,7 @@ function renderRound() {
   $('#btnPreview').disabled = !myGame || st.liveActive;
   if (myGame && !st.liveActive && previewRound !== st.season * 100 + st.round && window.innerWidth > 600) { previewRound = st.season * 100 + st.round; openPreview(); }
   $('#speed').onchange = (e) => { setSpeed(e.target.value); if (playing) startTimer(); };
-  $('#btnPlay').onclick = () => { game.start_round(); halftimeDone = false; seenEvents = 0; lastMinute = 0; runLive(); };
+  $('#btnPlay').onclick = () => { game.start_round(); halftimeDone = false; seenEvents = 0; lastMinute = 0; shootReveal = Infinity; runLive(); };
   $('#sndOn').onchange = (e) => { setSound(e.target.checked); $('#sndVol').disabled = !e.target.checked; if (e.target.checked) sfx('virar'); };
   $('#sndVol').oninput = (e) => setVolume(+e.target.value / 100);
   $('#sndVol').onchange = () => sfx('cartao');
@@ -372,16 +379,20 @@ function renderRound() {
 
 let previewRound = -1;
 let liveTimer = null, paused = false, halftime = false, halftimeDone = false, seenEvents = 0, lastMinute = 0;
+let liveDone = false, shootReveal = Infinity, shootMatch = null;
 function showLive(live) {
   const myId = st.managed.id;
   const myMatch = live.find((r) => r.home === myId || r.away === myId);
-  const minute = live.length ? live[0].minute : 0;
+  const minute = myMatch ? myMatch.minute : live.reduce((a, r) => Math.max(a, r.minute), 0);
+  liveDone = live.length > 0 && live.every((r) => r.over);
+  // disputa por pênaltis da partida do usuário: revelada cobrança a cobrança (exceto no modo Rápido)
+  if (myMatch && myMatch.pens && shootReveal === Infinity && !shootMatch && getSpeed() !== 'rapido') { shootReveal = 0; shootMatch = myMatch; }
   $('#clock').textContent = String(minute).padStart(2, '0') + "'";
-  $('#period').textContent = minute >= 90 ? 'Fim de jogo' : halftime ? 'INTERVALO' : minute > 45 ? '2º tempo' : minute > 0 ? '1º tempo' : '';
+  $('#period').textContent = myMatch && myMatch.pens ? 'Pênaltis' : (myMatch ? myMatch.over : liveDone) ? 'Fim de jogo' : halftime ? 'INTERVALO' : minute > 90 ? 'Prorrogação' : minute > 45 ? '2º tempo' : minute > 0 ? '1º tempo' : '';
   for (const r of live) {
     const c = document.getElementById('sc-' + r.home);
     if (c) {
-      const txt = `${r.hg} x ${r.ag}`;
+      const txt = `${r.hg} x ${r.ag}${r.pens && (r !== myMatch || shootReveal === Infinity) ? ` (${r.pens[0]}x${r.pens[1]} pên.)` : r.et ? ' (prorr.)' : ''}`;
       // gol em outro jogo: só um destaque discreto na linha do placar (sem texto na narração)
       if (r !== myMatch && c.dataset.score !== undefined && c.dataset.score !== txt) { const tr = c.closest('tr'); tr.classList.remove('goal-flash'); void tr.offsetWidth; tr.classList.add('goal-flash'); }
       c.dataset.score = txt; c.textContent = txt;
@@ -390,7 +401,8 @@ function showLive(live) {
     const g = document.getElementById('renda-' + r.home); if (g) g.textContent = money(r.receipts);
   }
   // narração: somente os lances da partida do usuário
-  const lines = myMatch ? myMatch.events.slice().reverse() : [];
+  let shown = 0;
+  const lines = myMatch ? myMatch.events.filter((e) => !e.kind.startsWith('disputa') || shown++ < shootReveal).reverse() : [];
   $('#ticker').innerHTML = (halftime ? '<div class="gol">⏸ INTERVALO — faça substituições ou mude a tática e clique em "Iniciar 2º tempo".</div>' : '') +
     (myMatch ? lines.map((e) => `<div class="${e.kind}" data-m="${myMatch.home}">${String(e.minute).padStart(2, '0')}' ${esc(e.text)}</div>`).join('')
       : (live.length ? '<div>Seu clube não joga nesta rodada. Acompanhe os placares na lista ao lado.</div>' : ''));
@@ -400,7 +412,7 @@ function showLive(live) {
   if (of && myMatch && minute > 0) { closeWindow('pre-jogo'); if ($('#btnPreview')) $('#btnPreview').disabled = true; of.innerHTML = onFieldHtml(myMatch); }
   if (myMatch) {
     if (lastMinute === 0 && minute >= 1) sfx('kickoff', getSpeed());
-    for (const e of myMatch.events.slice(seenEvents)) if (['gol', 'cartao', 'vermelho', 'penalti', 'penalti_perdido'].includes(e.kind)) sfx(e.kind, getSpeed());
+    for (const e of myMatch.events.slice(seenEvents)) if (['gol', 'cartao', 'vermelho', 'penalti', 'penalti_perdido', 'prorrogacao'].includes(e.kind)) sfx(e.kind, getSpeed());
     seenEvents = myMatch.events.length;
   }
   lastMinute = minute;
@@ -425,7 +437,13 @@ function startTimer() {
   liveTimer = setInterval(() => {
     if (paused) return;
     const minute = showLive(JSON.parse(game.step(1)));
-    if (minute >= 90) finishLive();
+    if (liveDone) {
+      if (shootMatch && shootReveal === 0) {
+        clearInterval(liveTimer);
+        $('#btnPause').classList.add('hidden');
+        animateShootout(shootMatch.events, (n) => { shootReveal = n; showLive(JSON.parse(game.live())); }, getSpeed(), () => { shootReveal = Infinity; finishLive(); });
+      } else finishLive();
+    }
     else if (minute === 45 && !halftimeDone) {
       if (getSpeed() === 'rapido') halftimeDone = true; else enterHalftime();
     }
@@ -437,15 +455,17 @@ function runLive() {
   $('#btnPause').textContent = '⏸ Pausar';
   $('#btnPause').onclick = () => { paused = !paused; $('#btnPause').textContent = paused ? '▶ Continuar' : '⏸ Pausar'; };
   $('#btnHalf').onclick = startSecondHalf;
-  $('#btnSkip').onclick = () => { halftime = false; showLive(JSON.parse(game.step(90))); finishLive(); };
+  $('#btnSkip').onclick = () => { halftime = false; showLive(JSON.parse(game.step(200))); shootReveal = Infinity; finishLive(); };
   const minute = showLive(JSON.parse(game.live()));
   if (minute === 45 && !halftimeDone && getSpeed() !== 'rapido') enterHalftime(); else startTimer();
 }
 function finishLive() {
   clearInterval(liveTimer);
   halftime = false;
+  if (!playing) return;
   const results = JSON.parse(game.finish_round());
   playing = false;
+  shootMatch = null; shootReveal = Infinity;
   sfx('final', getSpeed());
   const myMatch = results.find((r) => st.managed && (r.home === st.managed.id || r.away === st.managed.id));
   const att = myMatch ? `Público: ${myMatch.attendance.toLocaleString('pt-BR')} — Renda: ${money(myMatch.receipts)}` : '';
@@ -453,7 +473,10 @@ function finishLive() {
   $('#ticker').insertAdjacentHTML('afterbegin', `<div class="gol">FIM DE JOGO! ${att}</div>`);
   $('#btnSkip').classList.add('hidden'); $('#btnPause').classList.add('hidden'); $('#btnHalf').classList.add('hidden');
   $('#period').textContent = 'Fim de jogo';
-  if (myMatch) $('#nextLabel').textContent = `Resultado: ${myMatch.homeName} ${myMatch.hg} x ${myMatch.ag} ${myMatch.awayName}`;
+  if (myMatch) {
+    const pe = myMatch.events.find((e) => e.kind === 'disputa_fim');
+    $('#nextLabel').textContent = `Resultado: ${myMatch.homeName} ${myMatch.hg} x ${myMatch.ag} ${myMatch.awayName}${pe ? ' — ' + pe.text : ''}`;
+  }
   if (document.getElementById('subs')) $('#subs').innerHTML = '';
   if (st.managed) renderRoundSummary(st.managed.lastRound, myMatch);
   $('#btnPlay').disabled = false; $('#btnPlay').textContent = '▶ Próxima rodada';
@@ -461,7 +484,9 @@ function finishLive() {
   setStatus();
   autosave();
   if (st.reportPending) setTimeout(showFinale, 600);
+  else if (st.cup.drawPending) setTimeout(showDraw, 700);
 }
+
 
 function renderRoundSummary(f, myMatch) {
   const isHome = myMatch && myMatch.home === st.managed.id;
@@ -798,6 +823,37 @@ if (location.search.includes('selftest')) (async () => {
     store = real;
     out.push('armazenamento=ok');
     out.push('rodada_apos_load=' + JSON.parse(game.state()).round);
+    // Copa Nacional: dia de Copa no meio da semana, sorteio, chaveamento e pênaltis animados
+    {
+      let guard = 0;
+      while (JSON.parse(game.state()).dayType !== 'cup' && guard++ < 30) game.play_round();
+      refresh(); closeWindow('sorteio'); tab = 'jogos'; render();
+      const cs = st;
+      if (!$('#nextLabel').textContent.includes('COPA NACIONAL')) throw 'rótulo do dia de Copa';
+      if (document.querySelectorAll('#scoreboard tr').length - 1 !== cs.cup.ties[cs.cup.round].length) throw 'jogos da Copa no placar';
+      const cr = cs.cup.round, lr = cs.round;
+      setSpeed('rapido');
+      $('#btnPlay').click();
+      if (!(await wait(() => !playing, 15000))) throw 'dia de Copa não terminou';
+      const s3 = JSON.parse(game.state());
+      if (s3.cup.round !== cr + 1 || s3.round !== lr) throw 'avanço da Copa';
+      if (s3.cup.ties[cr].some((t) => !t.played || t.winner === null)) throw 'confrontos sem vencedor';
+      if (!(await wait(() => !!$('#sorteio'), 3000))) throw 'janela do sorteio';
+      if (document.querySelectorAll('#sorteio .draw-row').length !== s3.cup.ties[cr + 1].length) throw 'sorteio incompleto';
+      $('#drawOk').click();
+      if (JSON.parse(game.state()).cup.drawPending) throw 'sorteio não confirmado';
+      document.querySelector('.menubar [data-tab=copa]').click();
+      if (document.querySelectorAll('#copa .cupcol').length !== 6 || document.querySelectorAll('#copa .cuptie').length !== 32 + 16 + 8 + (cr >= 2 ? 4 : 0)) throw 'chaveamento da Copa';
+      closeWindow('copa');
+      // disputa por pênaltis revelada cobrança a cobrança, com sons
+      const evs = [{ kind: 'disputa_inicio', text: 'x', minute: 120 }, { kind: 'disputa_gol', text: 'a', minute: 120 }, { kind: 'disputa_perdido', text: 'b', minute: 120 }, { kind: 'disputa_fim', text: 'c', minute: 120 }];
+      soundLog.length = 0;
+      const shown = [];
+      await new Promise((res) => animateShootout(evs, (n) => shown.push(n), 'normal', res));
+      if (shown.join(',') !== '1,2,3,4' || !soundLog.includes('disputa_gol') || !soundLog.includes('disputa_perdido') || !soundLog.includes('penalti')) throw 'animação dos pênaltis: ' + shown + ' / ' + soundLog;
+      setSpeed('normal');
+      out.push('copa=ok');
+    }
     // reta final: joga até a última rodada e assiste ao vivo (tabela "se terminasse agora")
     while (JSON.parse(game.state()).round < 28) game.play_round();
     refresh(); tab = 'jogos'; render();
@@ -813,6 +869,7 @@ if (location.search.includes('selftest')) (async () => {
     const seen = [];
     for (let k = 0; k < 10 && !!$('#finale'); k++) {
       seen.push($('#finale').dataset.page);
+      if (k === 0 && !$('#finale').textContent.includes('Copa Nacional')) throw 'campeão da Copa no encerramento';
       if (k === 1) { $('#finPrev').click(); if ($('#finale').dataset.page !== seen[0]) throw 'anterior'; $('#finNext').click(); }
       $('#finNext').click();
     }
@@ -822,7 +879,9 @@ if (location.search.includes('selftest')) (async () => {
     if (s2.history.length !== 1 || s2.history[0].champions.length !== 4) throw 'histórico';
     out.push('encerramento=' + seen.length + 'p');
     openHistory();
-    if (!$('#historico').textContent.includes('Galeria de campeões')) throw 'aba histórico';
+    if (!$('#historico').textContent.includes('🏆 Copa') || !s2.history[0].cupWinner) throw 'Copa no histórico';
+    if (!$('#historico').textContent
+.includes('Galeria de campeões')) throw 'aba histórico';
     $('#btnReopen').click();
     if (!$('#finale')) throw 'rever encerramento';
     $('#finSkipBtn').click();
@@ -835,7 +894,23 @@ if (location.search.includes('selftest')) (async () => {
   document.body.insertAdjacentHTML('beforeend', `<pre id="selftest">${out.join(' | ')}</pre>`);
 })();
 
+// Demonstração da Copa: index.html?copa vai ao 1º dia de Copa com um clube cujo jogo terá pênaltis.
+if (location.search.includes('copa')) {
+  $('#btnNew').click();
+  document.querySelector('#teamList button').click();
+  game.play_round(); game.play_round();
+  const snap = game.save();
+  game.start_round();
+  const lv = JSON.parse(game.step(200));
+  const t = lv.find((x) => x.pens) || lv.find((x) => x.et) || lv[0];
+  const pick = t.home;
+  game = FutManager.load(snap);
+  game.choose_team(pick);
+  closeWhere(() => true);
+  refresh(); tab = 'jogos'; render();
+}
 // Demonstração do fim de temporada: index.html?finale leva o jogo até a última rodada.
+
 if (location.search.includes('finale')) {
   $('#btnNew').click();
   document.querySelector('#teamList button').click();

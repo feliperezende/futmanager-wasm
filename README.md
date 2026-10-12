@@ -115,3 +115,7 @@ Felipe Rezende e Grok Bot.
 ## Licença
 
 MIT
+
+## Copa Nacional
+
+Mata-mata com os 64 clubes em 6 fases (datas no meio da semana entre rodadas). Jogo único, prorrogação e disputa de pênaltis cobrança a cobrança (ao vivo, com sons, no jogo do seu clube). O clube de divisão inferior joga em casa. Sorteio exibido na janela 'Sorteio', chaveamento na aba 'Copa', premiação por fase alcançada e campeão no encerramento e no Histórico. Demonstração: `www/?copa`.

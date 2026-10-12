@@ -149,7 +149,35 @@ pub struct LiveMatch {
     pub attendance: i64,
     #[serde(default)]
     pub receipts: i64,
+    /// Jogo da Copa Nacional (mata-mata: prorrogação e pênaltis)
+    #[serde(default)]
+    pub cup: bool,
+    /// Está na prorrogação
+    #[serde(default)]
+    pub et: bool,
+    /// Resultado da disputa por pênaltis (mandante, visitante)
+    #[serde(default)]
+    pub pens: Option<(u32, u32)>,
 }
+
+impl LiveMatch {
+    /// Partida encerrada (90', ou 120' com prorrogação).
+    pub fn over(&self) -> bool { self.minute >= if self.et { 120 } else { 90 } }
+}
+
+pub const CUP_ROUNDS: usize = 6;
+/// A fase k da Copa é jogada depois de CUP_AFTER[k] rodadas do campeonato (data no meio da semana)
+pub const CUP_AFTER: [usize; CUP_ROUNDS] = [2, 7, 12, 17, 22, 26];
+/// Prêmio por classificar-se (vencer o confronto) em cada fase
+pub const CUP_PRIZE: [i64; CUP_ROUNDS] = [60_000, 100_000, 180_000, 300_000, 500_000, 1_500_000];
+pub const CUP_ROUND_NAMES: [&str; CUP_ROUNDS] = ["1ª fase", "2ª fase", "Oitavas de final", "Quartas de final", "Semifinal", "Final"];
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct CupTie { pub home: usize, pub away: usize, pub hg: u32, pub ag: u32, pub et: bool, pub pens: Option<(u32, u32)>, pub winner: Option<usize>, pub played: bool }
+
+/// Copa Nacional: mata-mata em jogo único com os 64 clubes.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Cup { pub season: u32, pub round: usize, pub ties: Vec<Vec<CupTie>>, pub winner: Option<usize>, pub draw_pending: bool }
 
 pub const MAX_SUBS: u8 = 3;
 /// Chance de gol de bola rolando por minuto (time médio)
@@ -282,6 +310,8 @@ pub struct Game {
     /// Galeria de campeões e temporadas do usuário
     #[serde(default)]
     pub history: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub cup: Cup,
 }
 
 pub const FORMATIONS: [&str; 5] = ["4-4-2", "4-3-3", "3-5-2", "5-3-2", "4-5-1"];
@@ -344,13 +374,14 @@ impl Game {
         }
         let mut g = Game { rng, season: 1, round: 0, teams, players, schedule: vec![], managed: None,
             finance: Finance::default(), news: vec![], last_results: vec![], live: vec![], fired: false, last_round: Finance::default(),
-            expected: vec![], last_report: None, report_pending: false, history: vec![] };
+            expected: vec![], last_report: None, report_pending: false, history: vec![], cup: Cup::default() };
         g.refill_free_agents();
         for i in 0..g.players.len() { if g.players[i].team.is_some() { g.players[i].contract_until = 1 + g.rng.range(0, 3) as u32; } }
         for t in 0..g.teams.len() { for _ in 0..2 { g.gen_prospect(t); } }
         g.build_schedule();
         for t in 0..g.teams.len() { g.auto_lineup(t); }
         g.compute_expected();
+        g.new_cup();
         g
     }
 
@@ -713,8 +744,18 @@ impl Game {
     }
 
     /// Avança um minuto de uma partida ao vivo.
+    /// Copa: empate no tempo normal leva à prorrogação; empate na prorrogação, aos pênaltis.
+    fn cup_checks(&mut self, m: &mut LiveMatch) {
+        if !m.cup { return; }
+        if m.minute == 90 && !m.et && m.hg == m.ag {
+            m.et = true;
+            m.events.push(Event { minute: 90, side: 0, kind: "prorrogacao".into(), text: "Empate no tempo normal: vamos para a prorrogação!".into() });
+        }
+        if m.et && m.minute == 120 && m.hg == m.ag && m.pens.is_none() { self.shootout(m); }
+    }
+
     fn step_match(&mut self, m: &mut LiveMatch) {
-        if m.minute >= 90 { return; }
+        if m.over() { return; }
         m.minute += 1;
         let minute = m.minute;
         // cansaço
@@ -785,7 +826,9 @@ impl Game {
         if minute == 62 || minute == 75 {
             for side in 0..2 {
                 let team = if side == 0 { m.home } else { m.away };
-                if Some(team) == self.managed || m.subs[side] >= MAX_SUBS - 1 || self.rng.f64() < 0.3 { continue; }
+                // sorteio feito antes, para o resultado não depender de qual clube é gerenciado
+                let roll = self.rng.f64();
+                if Some(team) == self.managed || m.subs[side] >= MAX_SUBS - 1 || roll < 0.3 { continue; }
                 // sai o mais cansado (ou o pior, se ninguém estiver cansado)
                 let energy = |id: usize| m.energy.get(&id).copied().unwrap_or(100.0);
                 let tired = m.on[side].iter().copied().filter(|&id| self.players[id].pos != Pos::G && energy(id) < 70.0)
@@ -971,7 +1014,9 @@ impl Game {
     }
 
     /// Joga a rodada inteira de uma vez. Ao fim da última rodada, encerra a temporada.
+    /// Joga a próxima rodada do campeonato (antes, as fases da Copa marcadas para o meio da semana).
     pub fn play_round(&mut self) -> Vec<MatchResult> {
+        while self.cup_due() { self.start_round(); while self.step() {} self.finish_round(); }
         self.start_round();
         while self.step() {}
         self.finish_round()
@@ -982,6 +1027,7 @@ impl Game {
         if !self.live.is_empty() { return; }
         if self.round >= ROUNDS { self.end_season(); }
 
+        if self.cup_due() { self.start_cup_day(); return; }
         self.news.clear();
         self.ai_transfers();
         for t in 0..self.teams.len() {
@@ -999,9 +1045,9 @@ impl Game {
 
     /// Avança um minuto em todas as partidas. Retorna false quando acabaram.
     pub fn step(&mut self) -> bool {
-        if self.live.is_empty() || self.live[0].minute >= 90 { return false; }
+        if self.live.is_empty() || self.live.iter().all(|m| m.over()) { return false; }
         let mut live = std::mem::take(&mut self.live);
-        for m in live.iter_mut() { self.step_match(m); }
+        for m in live.iter_mut() { if !m.over() { self.step_match(m); self.cup_checks(m); } }
         self.live = live;
         true
     }
@@ -1011,6 +1057,8 @@ impl Game {
         while self.step() {}
         let live = std::mem::take(&mut self.live);
         if live.is_empty() { return vec![]; }
+        let is_cup = live.iter().any(|m| m.cup);
+        let mut cup_results = vec![];
         let fin_before = self.finance.clone();
         let mut played_energy: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
         // suspensões cumpridas e recuperação de lesões
@@ -1020,7 +1068,8 @@ impl Game {
         }
         let mut results = Vec::new();
         for m in live {
-            for &pl in &m.booked {
+            // amarelos da Copa não contam para a suspensão do campeonato
+            for &pl in m.booked.iter().filter(|_| !m.cup) {
                 if m.reds.iter().any(|r| r.0 == pl) { continue; }
                 let p = &mut self.players[pl];
                 p.yellows += 1;
@@ -1031,11 +1080,16 @@ impl Game {
             for (&id, &e) in &m.energy { played_energy.insert(id, e); }
             self.update_morale(&m);
             let r = MatchResult { division: m.division, home: m.home, away: m.away, hg: m.hg, ag: m.ag, attendance: m.attendance, events: m.events, receipts: m.receipts };
-            self.apply_result(&r);
+            if m.cup {
+                self.teams[r.home].budget += r.receipts;
+                if Some(r.home) == self.managed { self.finance.tickets += r.receipts; }
+                cup_results.push((r.clone(), m.pens, m.et));
+            } else { self.apply_result(&r); }
             results.push(r);
         }
-        // salários
-        for t in 0..self.teams.len() {
+        if is_cup { self.finish_cup_day(&cup_results); }
+        // salários (só nas rodadas do campeonato)
+        for t in (0..self.teams.len()).filter(|_| !is_cup) {
             let pay: i64 = self.squad(t).iter().map(|&id| self.players[id].salary).sum();
             let upkeep = self.academy_upkeep(t) + self.stadium_upkeep(t);
             let tv = DIV_TV[self.teams[t].division];
@@ -1044,9 +1098,11 @@ impl Game {
             self.teams[t].budget -= pay + upkeep;
             if Some(t) == self.managed { self.finance.salaries += pay; self.finance.upkeep += upkeep; }
         }
-        self.advance_construction();
-        self.pay_bank_installments();
-        self.debt_consequences();
+        if !is_cup {
+            self.advance_construction();
+            self.pay_bank_installments();
+            self.debt_consequences();
+        }
         // recuperação física: quem jogou recupera boa parte do que perdeu; quem descansou volta a 100%
         for p in self.players.iter_mut() {
             p.condition = match played_energy.get(&p.id) { Some(&e) => recover(e, p.attrs.stamina), None => 100 };
@@ -1056,9 +1112,12 @@ impl Game {
         self.last_round = Finance { tickets: f.tickets - b.tickets, salaries: f.salaries - b.salaries, transfers_in: f.transfers_in - b.transfers_in,
             transfers_out: f.transfers_out - b.transfers_out, prizes: f.prizes - b.prizes, upkeep: f.upkeep - b.upkeep, investments: f.investments - b.investments,
             bank_in: f.bank_in - b.bank_in, bank_paid: f.bank_paid - b.bank_paid, loan_fees: f.loan_fees - b.loan_fees, tv: f.tv - b.tv };
-        self.round += 1;
-        if self.round >= ROUNDS { self.end_season(); }
+        if !is_cup {
+            self.round += 1;
+            if self.round >= ROUNDS { self.end_season(); }
+        }
         self.last_results = results.clone();
+
         results
     }
 
@@ -1074,6 +1133,121 @@ impl Game {
             f.push(if gf > ga { 'V' } else if gf == ga { 'E' } else { 'D' });
             while f.chars().count() > 5 { f.remove(0); }
         }
+    }
+
+    // ------------------------------------------------ Copa Nacional
+    /// Nova edição da Copa com todos os clubes e sorteio da 1ª fase.
+    pub fn new_cup(&mut self) {
+        self.cup = Cup { season: self.season, ..Default::default() };
+        let all: Vec<usize> = (0..self.teams.len()).collect();
+        self.cup_draw(all);
+    }
+    /// Sorteio: pares aleatórios; o clube de divisão inferior joga em casa.
+    fn cup_draw(&mut self, mut teams: Vec<usize>) {
+        for i in (1..teams.len()).rev() { let j = self.rng.range(0, i as i64) as usize; teams.swap(i, j); }
+        let ties = teams.chunks(2).map(|c| {
+            let (a, b) = (c[0], c[1]);
+            let (h, w) = if self.teams[b].division > self.teams[a].division { (b, a) } else { (a, b) };
+            CupTie { home: h, away: w, ..Default::default() }
+        }).collect();
+        self.cup.ties.push(ties);
+        self.cup.draw_pending = self.managed.is_some();
+    }
+    /// Há uma fase da Copa marcada antes da próxima rodada do campeonato.
+    pub fn cup_due(&self) -> bool {
+        self.live.is_empty() && self.cup.season == self.season && self.cup.round < CUP_ROUNDS && self.round >= CUP_AFTER[self.cup.round]
+            && self.round < ROUNDS && self.cup.ties.len() > self.cup.round
+    }
+    fn start_cup_day(&mut self) {
+        self.news.clear();
+        for t in 0..self.teams.len() { if Some(t) != self.managed || !self.lineup_valid(t) { self.auto_lineup(t); } }
+        for tie in self.cup.ties[self.cup.round].clone() {
+            let (h, a) = (tie.home, tie.away);
+            let on = [self.teams[h].lineup.clone(), self.teams[a].lineup.clone()];
+            let attendance = self.attendance(h);
+            let receipts = attendance * self.teams[h].ticket_price;
+            self.live.push(LiveMatch { division: self.teams[h].division, home: h, away: a, on, attendance, receipts, cup: true, ..Default::default() });
+        }
+    }
+    /// Disputa por pênaltis, cobrança a cobrança (5 para cada lado e depois alternadas).
+    fn shootout(&mut self, m: &mut LiveMatch) {
+        let minute = m.minute;
+        let order: Vec<Vec<usize>> = (0..2).map(|s| { let mut v = m.on[s].clone(); v.sort_by_key(|&id| (self.players[id].pos == Pos::G, -self.players[id].attrs.finishing, id)); v }).collect();
+        let keeper = |s: usize| m.on[s].iter().copied().max_by_key(|&id| (self.players[id].pos == Pos::G, self.players[id].attrs.keeping, std::cmp::Reverse(id)));
+        let keepers = [keeper(0), keeper(1)];
+        m.events.push(Event { minute, side: 0, kind: "disputa_inicio".into(), text: "Empate na prorrogação: disputa por pênaltis!".into() });
+        let (mut s, mut k) = ([0u32; 2], [0u32; 2]);
+        for i in 0..80 {
+            let side = i % 2;
+            let team = if side == 0 { m.home } else { m.away };
+            let goal = match order[side].get((k[side] as usize) % order[side].len().max(1)) {
+                Some(&t) => {
+                    let keep = keepers[1 - side].map(|g| self.players[g].attrs.keeping as f64).unwrap_or(10.0);
+                    let conv = penalty_conversion(self.players[t].attrs.finishing as f64, keep);
+                    let goal = self.rng.f64() < conv;
+                    k[side] += 1; if goal { s[side] += 1; }
+                    let verb = if goal { "converte" } else if self.rng.f64() < 0.6 { "para nas mãos do goleiro" } else { "chuta para fora" };
+                    m.events.push(Event { minute, side: side as u8, kind: if goal { "disputa_gol" } else { "disputa_perdido" }.into(),
+                        text: format!("{} ({}) {} — pênaltis {} x {}", self.players[t].name, self.teams[team].name, verb, s[0], s[1]) });
+                    goal
+                }
+                None => { k[side] += 1; false }
+            };
+            let _ = goal;
+            if k[0] <= 5 && k[1] <= 5 {
+                if s[0] + (5 - k[0]) < s[1] || s[1] + (5 - k[1]) < s[0] { break; }
+            }
+            if k[0] >= 5 && k[0] == k[1] && s[0] != s[1] { break; }
+        }
+        if s[0] == s[1] { s[if self.rng.f64() < 0.5 { 0 } else { 1 }] += 1; } // salvaguarda (nunca deve ocorrer)
+        m.pens = Some((s[0], s[1]));
+        let w = if s[0] > s[1] { m.home } else { m.away };
+        m.events.push(Event { minute, side: if s[0] > s[1] { 0 } else { 1 }, kind: "disputa_fim".into(), text: format!("{} vence nos pênaltis por {} x {}!", self.teams[w].name, s[0].max(s[1]), s[0].min(s[1])) });
+    }
+    /// Encerra o dia de Copa: atualiza o chaveamento, paga prêmios e sorteia a próxima fase.
+    fn finish_cup_day(&mut self, results: &[(MatchResult, Option<(u32, u32)>, bool)]) {
+        let r = self.cup.round;
+        let name = CUP_ROUND_NAMES[r];
+        let mut winners = vec![];
+        for (res, pens, et) in results {
+            let Some(tie) = self.cup.ties[r].iter_mut().find(|t| t.home == res.home && t.away == res.away) else { continue };
+            tie.hg = res.hg; tie.ag = res.ag; tie.pens = *pens; tie.et = *et; tie.played = true;
+            let win = if res.hg > res.ag { res.home } else if res.ag > res.hg { res.away } else if pens.map_or(false, |p| p.0 > p.1) { res.home } else { res.away };
+            let lose = if win == res.home { res.away } else { res.home };
+            tie.winner = Some(win);
+            winners.push(win);
+            let prize = CUP_PRIZE[r];
+            self.teams[win].budget += prize;
+            if Some(win) == self.managed { self.finance.prizes += prize; }
+            let how = if pens.is_some() { " nos pênaltis" } else if *et { " na prorrogação" } else { "" };
+            if Some(win) == self.managed || Some(lose) == self.managed || self.teams[lose].division + 1 < self.teams[win].division || r >= 3 {
+                self.news.push(format!("Copa ({name}): {} elimina o {}{how}", self.teams[win].name, self.teams[lose].name));
+            }
+        }
+        self.cup.round += 1;
+        if self.cup.round < CUP_ROUNDS { self.cup_draw(winners); }
+        else if let Some(&w) = winners.first() {
+            self.cup.winner = Some(w);
+            self.news.push(format!("🏆 {} é o campeão da Copa Nacional!", self.teams[w].name));
+        }
+    }
+    pub fn cup_json(&self) -> serde_json::Value {
+        let n = |t: usize| self.teams[t].name.clone();
+        let mut status = "—".to_string();
+        if let Some(m) = self.managed {
+            status = format!("Participando: {}", CUP_ROUND_NAMES[self.cup.round.min(CUP_ROUNDS - 1)]);
+            for (r, ties) in self.cup.ties.iter().enumerate() {
+                if let Some(t) = ties.iter().find(|t| t.home == m || t.away == m) {
+                    if t.played && t.winner != Some(m) { status = format!("Eliminado na {}", CUP_ROUND_NAMES[r].to_lowercase()); }
+                    if t.played && t.winner == Some(m) && r == CUP_ROUNDS - 1 { status = "🏆 Campeão da Copa!".into(); }
+                }
+            }
+        }
+        serde_json::json!({"season": self.cup.season, "round": self.cup.round, "roundNames": CUP_ROUND_NAMES, "prizes": CUP_PRIZE, "after": CUP_AFTER,
+            "winner": self.cup.winner.map(n), "winnerId": self.cup.winner, "drawPending": self.cup.draw_pending, "status": status,
+            "ties": self.cup.ties.iter().map(|r| r.iter().map(|t| serde_json::json!({"home": t.home, "away": t.away, "homeName": n(t.home), "awayName": n(t.away),
+                "homeDiv": self.teams[t.home].division, "awayDiv": self.teams[t.away].division, "hg": t.hg, "ag": t.ag, "et": t.et, "pens": t.pens,
+                "winner": t.winner, "played": t.played})).collect::<Vec<_>>()).collect::<Vec<_>>()})
     }
 
     /// Ranking de força dentro de cada divisão (1 = favorito).
@@ -1156,6 +1330,17 @@ impl Game {
         let old_div: Vec<usize> = self.teams.iter().map(|t| t.division).collect();
         let mut news = vec![format!("Fim da temporada {}!", self.season)];
         let mut report = self.build_report(&tables);
+        {
+            let n = |t: usize| self.teams[t].name.clone();
+            let fin = self.cup.ties.get(CUP_ROUNDS - 1).and_then(|r| r.first()).filter(|t| t.played);
+            let mut best = None;
+            if let Some(m) = self.managed { for (r, ties) in self.cup.ties.iter().enumerate() { if ties.iter().any(|t| t.home == m || t.away == m) { best = Some(r); } } }
+            report["cup"] = serde_json::json!({"winner": self.cup.winner.map(n), "winnerId": self.cup.winner,
+                "runnerUp": fin.and_then(|t| t.winner.map(|w| n(if w == t.home { t.away } else { t.home }))),
+                "final": fin.map(|t| serde_json::json!({"homeName": n(t.home), "awayName": n(t.away), "hg": t.hg, "ag": t.ag, "et": t.et, "pens": t.pens})),
+                "userBest": best.map(|r| if self.cup.winner == self.managed && self.managed.is_some() { "Campeão".to_string() } else { CUP_ROUND_NAMES[r].to_string() }),
+                "userChampion": self.managed.is_some() && self.cup.winner == self.managed});
+        }
         let mut retired_names: Vec<String> = vec![];
         let news_before = news.len();
         self.return_loans(&mut news);
@@ -1229,6 +1414,7 @@ impl Game {
         for t in 0..self.teams.len() { self.auto_lineup(t); }
         self.news = news;
         self.compute_expected();
+        self.new_cup();
         if let Some(m) = self.managed {
             let s = self.season;
             let expiring: Vec<String> = self.squad(m).iter().filter(|&&id| self.players[id].contract_until <= s && self.players[id].loan_from.is_none())
@@ -1242,7 +1428,7 @@ impl Game {
         self.history.push(serde_json::json!({"season": report["season"],
             "champions": report["divisions"].as_array().map(|v| v.iter().map(|d| d["champion"]["name"].clone()).collect::<Vec<_>>()).unwrap_or_default(),
             "team": u["team"], "division": u["division"], "position": u["position"], "expected": u["expected"], "pts": u["pts"], "grade": u["grade"], "fate": u["fate"],
-            "topScorer": report["awards"]["topScorer"]["name"]}));
+            "topScorer": report["awards"]["topScorer"]["name"], "cupWinner": report["cup"]["winner"]}));
         if self.history.len() > 200 { self.history.remove(0); }
         self.last_report = Some(report);
         self.report_pending = self.managed.is_some();
@@ -1408,6 +1594,7 @@ impl Game {
         // saves antigos: jogadores esgotados (0%) recebem uma recuperação imediata
         for p in self.players.iter_mut() { if p.condition < 60 { p.condition = recover(p.condition as f64, p.attrs.stamina); } }
         if self.expected.len() != self.teams.len() { self.compute_expected(); }
+        if self.cup.season != self.season || self.cup.ties.is_empty() { self.new_cup(); }
     }
 
     // ------------------------------------------------ JSON para a interface
@@ -1422,18 +1609,22 @@ impl Game {
 
     /// Estado das partidas ao vivo de uma divisão.
     pub fn live_json(&self, div: usize) -> serde_json::Value {
-        serde_json::Value::Array(self.live.iter().filter(|m| m.division == div).map(|m| { let bench: Vec<Vec<serde_json::Value>> = [0usize, 1].iter().map(|&s| if Some(if s == 0 { m.home } else { m.away }) == self.managed {
-                self.bench(m, s).iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>() } else { vec![] }).collect(); serde_json::json!({
+        serde_json::Value::Array(self.live.iter().filter(|m| m.cup || m.division == div).map(|m| { let bench: Vec<Vec<serde_json::Value>> = [0usize, 1].iter().map(|&s| if Some(if s == 0 { m.home } else { m.away }) == self.managed {
+                self.bench(m, s).iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>() } else { vec![] }).collect();
+            // na Copa (32 jogos), detalhes só da partida do usuário
+            let detail = !m.cup || Some(m.home) == self.managed || Some(m.away) == self.managed;
+            let none: Vec<usize> = vec![];
+            let on = |s: usize| if detail { m.on[s].iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>() } else { vec![] };
+            serde_json::json!({ "cup": m.cup, "et": m.et, "pens": m.pens, "over": m.over(), "division": m.division,
             "home": m.home, "away": m.away, "homeName": self.teams[m.home].name, "awayName": self.teams[m.away].name,
-            "hg": m.hg, "ag": m.ag, "minute": m.minute, "events": m.events, "subs": m.subs, "bench": bench,
+            "hg": m.hg, "ag": m.ag, "minute": m.minute, "events": if detail { m.events.clone() } else { vec![] }, "subs": m.subs, "bench": bench,
             "attendance": m.attendance, "receipts": m.receipts, "capacity": self.teams[m.home].capacity,
             "booked": m.booked, "sentOff": m.reds.iter().map(|r| r.0).collect::<Vec<_>>(), "hurt": m.injuries.iter().map(|r| r.0).collect::<Vec<_>>(),
-            "outIds": m.out, "outPlayers": m.out.iter().map(|&id| serde_json::json!({"id": id, "name": self.players[id].name, "pos": self.players[id].pos.label(), "team": self.players[id].team})).collect::<Vec<_>>(),
+            "outIds": if detail { &m.out } else { &none }, "outPlayers": m.out.iter().filter(|_| detail).map(|&id| serde_json::json!({"id": id, "name": self.players[id].name, "pos": self.players[id].pos.label(), "team": self.players[id].team})).collect::<Vec<_>>(),
             "tactics": [&self.teams[m.home].tactic, &self.teams[m.away].tactic], "formations": [&self.teams[m.home].formation, &self.teams[m.away].formation],
-            "energy": m.energy.iter().map(|(k, v)| (k.to_string(), serde_json::json!(v))).collect::<serde_json::Map<String, serde_json::Value>>(),
+            "energy": m.energy.iter().filter(|_| detail).map(|(k, v)| (k.to_string(), serde_json::json!(v))).collect::<serde_json::Map<String, serde_json::Value>>(),
 
-            "on": [m.on[0].iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>(),
-                   m.on[1].iter().map(|&id| self.player_json(&self.players[id])).collect::<Vec<_>>()]}) }).collect())
+            "on": [on(0), on(1)]}) }).collect())
     }
 
     /// Ficha somente leitura de qualquer clube.
@@ -1472,7 +1663,13 @@ impl Game {
             serde_json::json!({"id": t, "name": self.teams[t].name, "p": s.p, "w": s.w, "d": s.d, "l": s.l, "gf": s.gf, "ga": s.ga, "pts": s.pts, "ded": s.deducted, "form": self.teams[t].form})
         }).collect::<Vec<_>>()).collect();
         let mut next: Vec<serde_json::Value> = vec![];
-        if self.round < ROUNDS { for d in 0..DIVISIONS { for &(h, a) in &self.schedule[d][self.round] {
+        let cup_day = self.live.first().map_or(self.cup_due(), |m| m.cup);
+        if cup_day {
+            let r = self.cup.round.min(CUP_ROUNDS - 1);
+            for t in &self.cup.ties[r] {
+                next.push(serde_json::json!({"division": self.teams[t.home].division, "cup": true, "home": t.home, "away": t.away, "homeName": self.teams[t.home].name, "awayName": self.teams[t.away].name}));
+            }
+        } else if self.round < ROUNDS { for d in 0..DIVISIONS { for &(h, a) in &self.schedule[d][self.round] {
             next.push(serde_json::json!({"division": d, "home": h, "away": a, "homeName": self.teams[h].name, "awayName": self.teams[a].name}));
         } } }
         let managed = self.managed.map(|m| {
@@ -1497,6 +1694,7 @@ impl Game {
             "fired": self.fired, "jobOffers": self.job_offers().iter().map(|&t| serde_json::json!({"id": t, "name": self.teams[t].name, "division": self.teams[t].division, "budget": self.teams[t].budget})).collect::<Vec<_>>(),
             "managed": managed, "teams": teams, "news": self.news, "formations": FORMATIONS,
             "reportPending": self.report_pending, "report": self.last_report, "history": self.history,
+            "dayType": if cup_day { "cup" } else { "league" }, "cupRoundName": CUP_ROUND_NAMES[self.cup.round.min(CUP_ROUNDS - 1)], "cup": self.cup_json(),
             "expected": self.managed.and_then(|m| self.expected.get(m).copied()), "promoted": PROMOTED, "teamsPerDiv": TEAMS_PER_DIV,
             "scorers": scorers.iter().take(15).map(|p| self.player_json(p)).collect::<Vec<_>>()})
     }
@@ -1624,6 +1822,9 @@ impl FutManager {
     pub fn version() -> String { env!("CARGO_PKG_VERSION").to_string() }
     /// O usuário viu o encerramento da temporada.
     pub fn ack_report(&mut self) { self.g.report_pending = false; }
+    /// O usuário viu o sorteio da Copa.
+    pub fn ack_cup_draw(&mut self) { self.g.cup.draw_pending = false; }
+
     /// Ficha de qualquer clube (somente leitura).
     pub fn team(&self, id: usize) -> String {
         if id >= self.g.teams.len() { return "null".into(); }
@@ -2339,6 +2540,7 @@ mod tests {
         let st = g.state_json();
         assert_eq!(st["tables"][0][0]["form"].as_str().unwrap().len(), 5);
         // ao vivo: listas em campo e cartões expostos
+        while g.cup_due() { g.start_round(); while g.step() {} g.finish_round(); }
         g.start_round();
         for _ in 0..90 { g.step(); }
         let live = g.live_json(0);
@@ -2507,5 +2709,82 @@ mod penalties {
         let a = run(42);
         assert_eq!(a, run(42));
         assert!(a.iter().any(|x| x.2.iter().any(|t| t.starts_with("PÊNALTI"))));
+    }
+}
+#[cfg(test)]
+mod copa {
+    use super::*;
+    #[test]
+    fn cup_full_edition() {
+        let (mut ets, mut pens) = (0, 0);
+        for seed in [3u64, 9, 21] {
+            let mut g = Game::new(seed);
+            g.managed = Some(60);
+            assert_eq!(g.cup.ties[0].len(), 32);
+            for t in &g.cup.ties[0] { assert!(g.teams[t.home].division >= g.teams[t.away].division, "divisão inferior joga em casa"); }
+            let budget0 = g.teams[60].budget;
+            let _ = budget0;
+            // a 1ª fase acontece depois de 2 rodadas do campeonato, no meio da semana
+            g.play_round(); g.play_round();
+            assert!(g.cup_due());
+            assert_eq!(g.state_json()["dayType"], "cup");
+            g.start_round();
+            assert!(g.live.iter().all(|m| m.cup) && g.live.len() == 32);
+            while g.step() {}
+            assert!(g.live.iter().all(|m| m.over() && (m.hg != m.ag || m.pens.is_some())));
+            let round_before = g.round;
+            g.finish_round();
+            assert_eq!(g.round, round_before, "Copa não conta como rodada do campeonato");
+            assert_eq!(g.cup.round, 1);
+            assert_eq!(g.cup.ties[1].len(), 16);
+            for _ in g.round..ROUNDS - 1 { g.play_round(); }
+            assert_eq!(g.cup.round, CUP_ROUNDS);
+            for (r, ties) in g.cup.ties.iter().enumerate() {
+                assert_eq!(ties.len(), 32 >> r);
+                for t in ties {
+                    assert!(t.played && t.winner.is_some());
+                    if t.et { ets += 1; }
+                    if let Some((a, b)) = t.pens { pens += 1; assert!(t.et && a != b && t.hg == t.ag); assert_eq!(t.winner == Some(t.home), a > b); }
+                    else { assert_ne!(t.hg, t.ag); assert_eq!(t.winner == Some(t.home), t.hg > t.ag); }
+                }
+                if r + 1 < CUP_ROUNDS { let w: Vec<usize> = ties.iter().map(|t| t.winner.unwrap()).collect(); for t in &g.cup.ties[r + 1] { assert!(w.contains(&t.home) && w.contains(&t.away)); } }
+            }
+            let champ = g.cup.winner.unwrap();
+            assert_eq!(g.cup.ties[CUP_ROUNDS - 1][0].winner, Some(champ));
+            g.play_round();
+            assert_eq!(g.season, 2);
+            assert_eq!(g.last_report.as_ref().unwrap()["cup"]["winnerId"], champ);
+            assert_eq!(g.history.last().unwrap()["cupWinner"], serde_json::json!(g.teams[champ].name));
+            assert_eq!(g.cup.season, 2);
+            assert_eq!(g.cup.ties.len(), 1);
+            // salvar/carregar no meio da Copa
+            let g2: Game = serde_json::from_str(&serde_json::to_string(&g).unwrap()).unwrap();
+            assert_eq!(g2.cup.ties[0].len(), 32);
+        }
+        assert!(ets > 0 && pens > 0, "prorrogações {ets}, pênaltis {pens}");
+    }
+    #[test]
+    fn cup_prize_paid_to_user() {
+        let mut g = Game::new(11);
+        g.managed = Some(0);
+        g.play_round(); g.play_round();
+        let p0 = g.finance.prizes;
+        g.play_round();
+        let won = g.cup.ties[0].iter().any(|t| t.winner == Some(0));
+        assert_eq!(g.finance.prizes - p0, if won { CUP_PRIZE[0] } else { 0 });
+    }
+    #[test]
+    fn shootout_is_decided_and_ordered() {
+        let mut g = Game::new(5);
+        g.start_round();
+        let mut m = g.live[0].clone();
+        m.cup = true; m.et = true; m.minute = 120; m.hg = 1; m.ag = 1;
+        g.shootout(&mut m);
+        let (a, b) = m.pens.unwrap();
+        assert_ne!(a, b);
+        let kicks: Vec<&Event> = m.events.iter().filter(|e| e.kind == "disputa_gol" || e.kind == "disputa_perdido").collect();
+        assert!(kicks.len() >= 6);
+        for (i, k) in kicks.iter().enumerate() { assert_eq!(k.side as usize, i % 2, "cobranças alternadas"); }
+        assert_eq!(kicks.iter().filter(|e| e.kind == "disputa_gol").count() as u32, a + b);
     }
 }

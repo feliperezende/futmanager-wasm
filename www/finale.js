@@ -111,7 +111,7 @@ function fateMsg(u) {
 function pages(r, st) {
   const u = r.user;
   const myDiv = u ? u.division : 0;
-  const celebrate = u && (u.champion || u.promoted);
+  const celebrate = u && (u.champion || u.promoted || (r.cup && r.cup.userChampion));
   const champ = r.divisions[myDiv].champion;
   const P = [];
   P.push({ key: 'campeao', title: '🏆 Campeões da temporada', party: celebrate, sound: celebrate ? 'festa' : '', html: `
@@ -120,7 +120,8 @@ function pages(r, st) {
       <div>${champ.pts} pontos · ${champ.w}V ${champ.d}E ${champ.l}D · ${champ.gf} gols</div>
       ${u && u.champion ? '<div class="party">É CAMPEÃO! A taça é sua!</div>' : `<div class="small">Vice: ${tl(r.divisions[myDiv].runnerUp.name)} (${r.divisions[myDiv].runnerUp.pts} pts)</div>`}</div></div>
     <table><tr><th>Divisão</th><th>Campeão</th><th>Pts</th><th>Vice</th><th>Artilheiro</th></tr>
-    ${r.divisions.map((d) => `<tr class="${u && d.champion.id === u.id ? 'me' : ''}"><td>🏆 ${DIV(d.division)}</td><td><b>${tl(d.champion.name)}</b></td><td class="n">${d.champion.pts}</td><td>${tl(d.runnerUp.name)}</td><td>${d.topScorer ? `${esc(d.topScorer.name)} (${d.topScorer.goals})` : '—'}</td></tr>`).join('')}</table>` });
+    ${r.divisions.map((d) => `<tr class="${u && d.champion.id === u.id ? 'me' : ''}"><td>🏆 ${DIV(d.division)}</td><td><b>${tl(d.champion.name)}</b></td><td class="n">${d.champion.pts}</td><td>${tl(d.runnerUp.name)}</td><td>${d.topScorer ? `${esc(d.topScorer.name)} (${d.topScorer.goals})` : '—'}</td></tr>`).join('')}</table>
+    ${r.cup && r.cup.winner ? `<p class="cupchamp ${r.cup.userChampion ? 'mine' : ''}">🏆 <b>Copa Nacional:</b> ${tl(r.cup.winner)}${r.cup.final ? ` — final ${esc(r.cup.final.homeName)} ${r.cup.final.hg} x ${r.cup.final.ag} ${esc(r.cup.final.awayName)}${r.cup.final.pens ? ` (${r.cup.final.pens[0]}x${r.cup.final.pens[1]} nos pênaltis)` : r.cup.final.et ? ' (prorrogação)' : ''}` : ''}${r.cup.userChampion ? ' — <b>A TAÇA É SUA!</b>' : ''}</p>` : ''}` });
   const [snd, msg] = u ? fateMsg(u) : ['', ''];
   const teamCell = (t) => `<span class="tlink ${u && t.id === u.id ? 'me-inline' : ''}" data-team="${t.id}">${esc(t.name)}</span>`;
   P.push({ key: 'acesso', title: '⬆⬇ Acesso e rebaixamento', party: u && u.promoted, sound: snd, html: `
@@ -152,7 +153,7 @@ function pages(r, st) {
         <tr><td>Campanha</td><td class="n">${u.pts} pts · ${u.w}V ${u.d}E ${u.l}D</td></tr>
         <tr><td>Gols</td><td class="n">${u.gf} pró · ${u.ga} contra (saldo ${u.gf - u.ga})</td></tr>
         ${u.deducted ? `<tr><td>Pontos perdidos (dívidas)</td><td class="n down">−${u.deducted}</td></tr>` : ''}
-        <tr><td>Artilheiro do clube</td><td class="n">${u.topScorer ? `${esc(u.topScorer.name)} (${u.topScorer.goals})` : '—'}</td></tr>
+        ${r.cup && r.cup.userBest ? `<tr><td>Copa Nacional</td><td class="n">${esc(r.cup.userBest === 'Campeão' ? '🏆 Campeão' : 'Chegou até: ' + r.cup.userBest)}</td></tr>` : ''}<tr><td>Artilheiro do clube</td><td class="n">${u.topScorer ? `${esc(u.topScorer.name)} (${u.topScorer.goals})` : '—'}</td></tr>
       </table></div><div><table>
         <tr><th colspan="2">Finanças da temporada</th></tr>
         <tr><td>Receitas (bilheteria, TV, prêmios, vendas)</td><td class="n">${money(inc)}</td></tr>
@@ -222,11 +223,11 @@ export function renderHistory(st, el, reopen) {
   const fateIcon = { champion: '🏆', champion_up: '🏆⬆', promoted: '⬆', relegated: '⬇', stay: '' };
   const titles = h.filter((x) => x.fate === 'champion' || x.fate === 'champion_up').length;
   const counts = new Map();
-  for (const s of h) for (const c of s.champions) counts.set(c, (counts.get(c) || 0) + 1);
+  for (const s of h) for (const c of [...s.champions, ...(s.cupWinner ? [s.cupWinner] : [])]) counts.set(c, (counts.get(c) || 0) + 1);
   const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
   el.innerHTML = h.length === 0 ? `<fieldset><legend>Histórico</legend><p>Nenhuma temporada encerrada ainda. Termine a temporada ${st.season} para inaugurar a galeria de campeões!</p></fieldset>` : `
-    <fieldset><legend>🏛 Galeria de campeões</legend><table><tr><th>Temp.</th>${[0, 1, 2, 3].map((d) => `<th>🏆 ${DIV(d)}</th>`).join('')}<th>Artilheiro</th></tr>
-      ${h.slice().reverse().map((s) => `<tr><td class="n">${s.season}</td>${s.champions.map((c) => `<td class="${c === s.team ? 'me' : ''}">${tl(c)}</td>`).join('')}<td>${esc(s.topScorer || '—')}</td></tr>`).join('')}</table></fieldset>
+    <fieldset><legend>🏛 Galeria de campeões</legend><table><tr><th>Temp.</th>${[0, 1, 2, 3].map((d) => `<th>🏆 ${DIV(d)}</th>`).join('')}<th>🏆 Copa</th><th>Artilheiro</th></tr>
+      ${h.slice().reverse().map((s) => `<tr><td class="n">${s.season}</td>${s.champions.map((c) => `<td class="${c === s.team ? 'me' : ''}">${tl(c)}</td>`).join('')}<td class="${s.cupWinner && s.cupWinner === s.team ? 'me' : ''}">${s.cupWinner ? tl(s.cupWinner) : '—'}</td><td>${esc(s.topScorer || '—')}</td></tr>`).join('')}</table></fieldset>
     <div class="cols"><div><fieldset><legend>📋 Suas temporadas (${titles} título(s))</legend><table><tr><th>Temp.</th><th>Clube</th><th>Div.</th><th>Pos.</th><th>Esperado</th><th>Pts</th><th>Nota</th><th></th></tr>
       ${h.slice().reverse().filter((s) => s.team).map((s) => `<tr><td class="n">${s.season}</td><td>${tl(s.team)}</td><td class="n">${s.division + 1}</td><td class="n">${s.position}º</td><td class="n">${s.expected}º</td><td class="n">${s.pts}</td><td class="n">${Number(s.grade).toFixed(1).replace('.', ',')}</td><td>${fateIcon[s.fate] || ''}</td></tr>`).join('')}</table></fieldset></div>
     <div><fieldset><legend>⭐ Maiores campeões</legend><table><tr><th>Clube</th><th>Títulos</th></tr>${top.map(([c, n]) => `<tr><td>${tl(c)}</td><td class="n">${n}</td></tr>`).join('')}</table></fieldset>
