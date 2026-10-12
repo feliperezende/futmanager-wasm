@@ -377,15 +377,21 @@ function showLive(live) {
   $('#clock').textContent = String(minute).padStart(2, '0') + "'";
   $('#period').textContent = minute >= 90 ? 'Fim de jogo' : halftime ? 'INTERVALO' : minute > 45 ? '2º tempo' : minute > 0 ? '1º tempo' : '';
   for (const r of live) {
-    const c = document.getElementById('sc-' + r.home); if (c) c.textContent = `${r.hg} x ${r.ag}`;
+    const c = document.getElementById('sc-' + r.home);
+    if (c) {
+      const txt = `${r.hg} x ${r.ag}`;
+      // gol em outro jogo: só um destaque discreto na linha do placar (sem texto na narração)
+      if (r !== myMatch && c.dataset.score !== undefined && c.dataset.score !== txt) { const tr = c.closest('tr'); tr.classList.remove('goal-flash'); void tr.offsetWidth; tr.classList.add('goal-flash'); }
+      c.dataset.score = txt; c.textContent = txt;
+    }
     const p = document.getElementById('pub-' + r.home); if (p) p.textContent = r.attendance.toLocaleString('pt-BR') + (r.attendance >= r.capacity ? ' (lotado)' : '');
     const g = document.getElementById('renda-' + r.home); if (g) g.textContent = money(r.receipts);
   }
-  const lines = [];
-  for (const r of live) for (const e of r.events) if (r === myMatch || e.kind === 'gol') lines.push({ e, r });
-  lines.sort((a, b) => b.e.minute - a.e.minute);
+  // narração: somente os lances da partida do usuário
+  const lines = myMatch ? myMatch.events.slice().reverse() : [];
   $('#ticker').innerHTML = (halftime ? '<div class="gol">⏸ INTERVALO — faça substituições ou mude a tática e clique em "Iniciar 2º tempo".</div>' : '') +
-    lines.map(({ e, r }) => `<div class="${e.kind}">${String(e.minute).padStart(2, '0')}' ${r === myMatch ? '' : '[' + esc(r.homeName) + ' x ' + esc(r.awayName) + '] '}${esc(e.text)}</div>`).join('');
+    (myMatch ? lines.map((e) => `<div class="${e.kind}" data-m="${myMatch.home}">${String(e.minute).padStart(2, '0')}' ${esc(e.text)}</div>`).join('')
+      : (live.length ? '<div>Seu clube não joga nesta rodada. Acompanhe os placares na lista ao lado.</div>' : ''));
   if (typeof renderSubs === 'function') renderSubs(myMatch);
   renderLiveTable(st, live);
   const of = document.getElementById('onfield');
@@ -442,7 +448,7 @@ function finishLive() {
   const myMatch = results.find((r) => st.managed && (r.home === st.managed.id || r.away === st.managed.id));
   const att = myMatch ? `Público: ${myMatch.attendance.toLocaleString('pt-BR')} — Renda: ${money(myMatch.receipts)}` : '';
   st = JSON.parse(game.state());
-  $('#ticker').insertAdjacentHTML('afterbegin', `<div class="gol">FIM DE JOGO! ${att}</div>${st.news.map((n) => `<div>📰 ${esc(n)}</div>`).join('')}`);
+  $('#ticker').insertAdjacentHTML('afterbegin', `<div class="gol">FIM DE JOGO! ${att}</div>`);
   $('#btnSkip').classList.add('hidden'); $('#btnPause').classList.add('hidden'); $('#btnHalf').classList.add('hidden');
   $('#period').textContent = 'Fim de jogo';
   if (myMatch) $('#nextLabel').textContent = `Resultado: ${myMatch.homeName} ${myMatch.hg} x ${myMatch.ag} ${myMatch.awayName}`;
@@ -675,6 +681,22 @@ if (location.search.includes('selftest')) (async () => {
     out.push('em_campo=ok');
 
     if (!soundLog.includes('kickoff') || !soundLog.includes('halftime')) throw 'sons de início/intervalo: ' + soundLog;
+    {
+      const lvx = JSON.parse(game.live());
+      const mine = lvx.find((x) => x.home === st.managed.id || x.away === st.managed.id);
+      const tl = [...document.querySelectorAll('#ticker div[data-m]')];
+      if (tl.some((d) => d.dataset.m !== String(mine.home))) throw 'narração com lance de outro jogo';
+      if (tl.length !== mine.events.length) throw `narração ${tl.length} != eventos do meu jogo ${mine.events.length}`;
+      const others = lvx.filter((x) => x !== mine).flatMap((x) => x.events.map((e) => e.text));
+      const txt = $('#ticker').textContent;
+      if (others.some((t) => !mine.events.some((e) => e.text === t) && txt.includes(t))) throw 'texto de outro jogo na narração';
+      if (/\[[^\]]+ x [^\]]+\]/.test(txt)) throw 'prefixo de outro jogo na narração';
+      const sounds = soundLog.filter((k) => ['gol', 'cartao', 'vermelho', 'penalti', 'penalti_perdido'].includes(k)).length;
+      const expect = mine.events.filter((e) => ['gol', 'cartao', 'vermelho', 'penalti', 'penalti_perdido'].includes(e.kind)).length;
+      if (sounds !== expect) throw `sons de lances (${sounds}) != lances do meu jogo (${expect})`;
+      out.push('narracao=ok');
+    }
+
     $('#btnHalf').click();
     if (!(await wait(() => !playing, 15000))) throw 'partida não terminou';
     if (!soundLog.includes('secondhalf') || soundLog[soundLog.length - 1] !== 'final') throw 'sons de 2º tempo/final: ' + soundLog;

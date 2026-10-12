@@ -188,3 +188,5 @@ body{padding-bottom:40px}
 .wm-maxed{left:0!important;top:0!important;width:auto!important;right:0;max-width:none;min-height:calc(100vh - 30px)}
 #taskbar .tb-start.on{border-style:inset;background:#e0e0e0}
 @media (max-width:600px){.wm-main{overflow:auto}.wm-main .tbtn-max{display:none}}
+@keyframes goalflash{0%,40%{background:#ffe680}100%{background:transparent}}
+tr.goal-flash td{animation:goalflash 1.6s ease-out}
