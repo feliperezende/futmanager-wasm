@@ -192,6 +192,19 @@ pub struct Negotiation { pub player: usize, pub counter: i64, pub attempts: u32 
 /// Leilão de um jogador por um clube endividado.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Auction { pub player: usize, pub seller: usize, pub min_bid: i64, pub user_bid: i64, pub rounds_left: u32 }
+/// Jornal da rodada ("O Placar Diário").
+pub const NEWSPAPER: &str = "O Placar Diário";
+pub const MAX_EDITIONS: usize = 80;
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Article { pub kind: String, pub title: String, pub text: String, #[serde(default)] pub score: i32 }
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Rumor { pub title: String, pub text: String, pub truth: bool }
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Edition { pub number: u32, pub season: u32, pub round: usize, pub cup: bool, pub label: String,
+    pub headline: Article, pub articles: Vec<Article>, pub rumors: Vec<Rumor>, pub mood: Article }
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Press { pub editions: Vec<Edition>, pub next_number: u32, pub unseen: bool, pub leaders: Vec<usize>, pub user_pos: usize,
+    pub sacked: Vec<(u32, usize)>, pub transfers_seen: usize }
 /// Registro de transferência (para o jornal e relatórios).
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct TransferRec { pub season: u32, pub round: usize, pub player: usize, pub name: String, pub from: Option<usize>, pub to: usize, pub fee: i64, pub kind: String }
@@ -340,6 +353,8 @@ pub struct Game {
     /// Ofertas novas ainda não vistas pelo usuário
     #[serde(default)]
     pub offers_unseen: bool,
+    #[serde(default)]
+    pub press: Press,
 }
 
 pub const FORMATIONS: [&str; 5] = ["4-4-2", "4-3-3", "3-5-2", "5-3-2", "4-5-1"];
@@ -362,6 +377,7 @@ fn gen_word(rng: &mut Rng, n: usize) -> String { (0..n).map(|_| *rng.pick(&SYL))
 fn gen_city(rng: &mut Rng) -> String { let n = rng.range(2, 3) as usize; cap(&gen_word(rng, n)) + *rng.pick(&CITY_END) }
 fn gen_player_name(rng: &mut Rng) -> String { format!("{} {}", rng.pick(&FIRST), cap(&(gen_word(rng, 2) + *rng.pick(&["s", "ni", "lho", "ra", "to", ""])))) }
 
+pub fn fmt_int(v: i64) -> String { fmt_money(v).replace("R$ ", "") }
 pub fn fmt_money(v: i64) -> String {
     let s = v.abs().to_string();
     let mut out = String::new();
@@ -413,7 +429,7 @@ impl Game {
         let mut g = Game { rng, season: 1, round: 0, teams, players, schedule: vec![], managed: None,
             finance: Finance::default(), news: vec![], last_results: vec![], live: vec![], fired: false, last_round: Finance::default(),
             expected: vec![], last_report: None, report_pending: false, history: vec![], cup: Cup::default(),
-            offers: vec![], next_offer_id: 0, negotiations: vec![], auction: None, transfers: vec![], offers_unseen: false };
+            offers: vec![], next_offer_id: 0, negotiations: vec![], auction: None, transfers: vec![], offers_unseen: false, press: Press::default() };
         g.refill_free_agents();
         for i in 0..g.players.len() { if g.players[i].team.is_some() { g.players[i].contract_until = 1 + g.rng.range(0, 3) as u32; } }
         for t in 0..g.teams.len() { for _ in 0..2 { g.gen_prospect(t); } }
@@ -1151,6 +1167,7 @@ impl Game {
         self.last_round = Finance { tickets: f.tickets - b.tickets, salaries: f.salaries - b.salaries, transfers_in: f.transfers_in - b.transfers_in,
             transfers_out: f.transfers_out - b.transfers_out, prizes: f.prizes - b.prizes, upkeep: f.upkeep - b.upkeep, investments: f.investments - b.investments,
             bank_in: f.bank_in - b.bank_in, bank_paid: f.bank_paid - b.bank_paid, loan_fees: f.loan_fees - b.loan_fees, tv: f.tv - b.tv };
+        self.publish_edition(&results, &cup_results, is_cup);
         if !is_cup {
             self.round += 1;
             if self.round >= ROUNDS { self.end_season(); }
@@ -1158,6 +1175,170 @@ impl Game {
         self.last_results = results.clone();
 
         results
+    }
+
+    // ------------------------------------------------ Jornal da rodada
+    fn publish_edition(&mut self, results: &[MatchResult], cup: &[(MatchResult, Option<(u32, u32)>, bool)], is_cup: bool) {
+        let n = |g: &Game, t: usize| g.teams[t].name.clone();
+        let me = self.managed;
+        let mut arts: Vec<Article> = vec![];
+        let mut add = |kind: &str, title: String, text: String, score: i32| arts.push(Article { kind: kind.into(), title, text, score });
+        let cup_name = if is_cup { CUP_ROUND_NAMES[self.cup.round.saturating_sub(1).min(CUP_ROUNDS - 1)] } else { "" };
+        for r in results {
+            let mine = me == Some(r.home) || me == Some(r.away);
+            let boost = if mine { 40 } else { 0 };
+            let (w, l, wg, lg) = if r.hg >= r.ag { (r.home, r.away, r.hg, r.ag) } else { (r.away, r.home, r.ag, r.hg) };
+            let margin = wg - lg;
+            let comp = if is_cup { format!("pela Copa ({})", cup_name.to_lowercase()) } else { format!("pela Divisão {}", r.division + 1) };
+            if margin >= 4 {
+                add("goleada", format!("{} atropela o {}: {} x {}", n(self, w), n(self, l), wg, lg),
+                    format!("Noite de gala {}: o {} não deu chance ao {} e aplicou uma goleada de {} x {}.", comp, n(self, w), n(self, l), wg, lg), 50 + 5 * margin as i32 + boost);
+            }
+            // zebra: no campeonato, ranking esperado bem pior; na Copa, divisão inferior
+            if margin > 0 {
+                let ew = self.expected.get(w).copied().unwrap_or(0) as i32; let el = self.expected.get(l).copied().unwrap_or(0) as i32;
+                let dw = self.teams[w].division as i32; let dl = self.teams[l].division as i32;
+                let zebra = if is_cup { if dw - dl >= 2 || (dw > dl && mine) { dw - dl } else { 0 } } else if ew - el >= 11 { (ew - el) / 4 } else { 0 };
+                if zebra >= 1 {
+                    add("zebra", format!("ZEBRA! {} derruba o {}", n(self, w), n(self, l)),
+                        format!("Ninguém apostava, mas o {} venceu o {} por {} x {} {}. A torcida não acredita.", n(self, w), n(self, l), wg, lg, comp), 55 + 12 * zebra + boost);
+                }
+            }
+            // hat-tricks
+            let mut goals: std::collections::BTreeMap<String, u32> = Default::default();
+            for e in r.events.iter().filter(|e| e.kind == "gol") {
+                let t = e.text.trim_start_matches("GOOOL! ");
+                let name = t.split(" converte").next().unwrap_or(t).split(" (").next().unwrap_or(t).to_string();
+                *goals.entry(name).or_default() += 1;
+            }
+            for (name, g) in goals.iter().filter(|(_, &g)| g >= 3) {
+                add("hattrick", format!("{} marca {} vezes{}", name, g, if *g == 3 { " e leva a bola para casa" } else { "!" }),
+                    format!("Hat-trick! {} foi o nome do jogo entre {} e {} ({} x {}).", name, n(self, r.home), n(self, r.away), r.hg, r.ag), 60 + 10 * *g as i32 + boost);
+            }
+            let pens = r.events.iter().filter(|e| e.kind == "penalti").count();
+            let missed: Vec<&Event> = r.events.iter().filter(|e| e.kind == "penalti_perdido").collect();
+            if let Some(e) = missed.first() {
+                add("penalti", "Pênalti desperdiçado!".into(), format!("{} — em {} x {} ({} x {}).", e.text, n(self, r.home), n(self, r.away), r.hg, r.ag), 30 + boost);
+            } else if pens >= 2 {
+                add("penalti", format!("Chuva de pênaltis em {} x {}", n(self, r.home), n(self, r.away)), format!("O árbitro apontou a marca da cal {} vezes no {} x {}.", pens, r.hg, r.ag), 28 + boost);
+            }
+            let reds: Vec<&Event> = r.events.iter().filter(|e| e.kind == "vermelho").collect();
+            if !reds.is_empty() {
+                add("vermelho", if reds.len() > 1 { format!("Jogo quente: {} expulsões em {} x {}", reds.len(), n(self, r.home), n(self, r.away)) } else { format!("Expulsão em {} x {}", n(self, r.home), n(self, r.away)) },
+                    reds.iter().map(|e| e.text.clone()).collect::<Vec<_>>().join(" "), 25 + 8 * reds.len() as i32 + boost);
+            }
+            if mine && margin < 4 {
+                let my = me.unwrap();
+                let res = if wg == lg { "empata com" } else if w == my { "vence o" } else { "perde para o" };
+                let opp = if r.home == my { r.away } else { r.home };
+                let (a, b) = if r.home == my { (r.hg, r.ag) } else { (r.ag, r.hg) };
+                add("seu_jogo", format!("{} {} {}: {} x {}", n(self, my), res, n(self, opp), a, b),
+                    format!("Diante de {} torcedores, o {} {} {} {}.", fmt_int(r.attendance), n(self, my), res, n(self, opp), comp), 45);
+            }
+        }
+        // Copa: classificados e campeão
+        if is_cup {
+            for (r, pens, et) in cup {
+                if let Some(p) = pens { add("copa", format!("Copa: {} x {} decidido nos pênaltis ({} x {})", n(self, r.home), n(self, r.away), p.0, p.1),
+                    format!("Após {} x {}{}, a disputa de pênaltis definiu o classificado.", r.hg, r.ag, if *et { " e prorrogação" } else { "" }), 35 + if me == Some(r.home) || me == Some(r.away) { 40 } else { 0 }); }
+            }
+            if let Some(w) = self.cup.winner.filter(|_| self.cup.round >= CUP_ROUNDS) {
+                add("copa", format!("{} é campeão da Copa Nacional!", n(self, w)), format!("Festa nas ruas: o {} levanta a taça da Copa Nacional {}.", n(self, w), self.season), 120 + if me == Some(w) { 60 } else { 0 });
+            } else {
+                let left = self.cup.ties.get(self.cup.round).map_or(0, |t| t.len() * 2);
+                add("copa", format!("Copa Nacional: definidos os {} classificados", left), format!("Sorteados os confrontos da {}.", CUP_ROUND_NAMES[self.cup.round.min(CUP_ROUNDS - 1)].to_lowercase()), 20);
+            }
+        } else {
+            // tabela: líderes e posição do usuário
+            if self.press.leaders.len() != DIVISIONS { self.press.leaders = vec![usize::MAX; DIVISIONS]; }
+            for d in 0..DIVISIONS {
+                let lead = self.table(d)[0];
+                if self.press.leaders[d] != lead && self.round >= 2 {
+                    add("tabela", format!("{} assume a liderança da Divisão {}", n(self, lead), d + 1), format!("Com {} pontos, o {} é o novo líder.", self.teams[lead].stats.pts, n(self, lead)), 30 + if me == Some(lead) { 50 } else { 0 } + if d == 0 { 10 } else { 0 });
+                }
+                self.press.leaders[d] = lead;
+            }
+            if let Some(m) = me {
+                let pos = self.table(self.teams[m].division).iter().position(|&t| t == m).unwrap_or(0) + 1;
+                let old = self.press.user_pos;
+                if old > 0 && pos != old && (old as i32 - pos as i32).abs() >= 3 {
+                    add("tabela", format!("{} {} na tabela: agora em {}º", n(self, m), if pos < old { "dispara" } else { "despenca" }, pos), format!("Era {}º antes da rodada.", old), 35);
+                }
+                self.press.user_pos = pos;
+            }
+            // demissões de técnicos (só sabor)
+            if self.round >= 5 {
+                for d in 0..DIVISIONS {
+                    let tb = self.table(d);
+                    let last = tb[tb.len() - 1];
+                    if Some(last) == me || self.press.sacked.iter().any(|&(s, t)| s == self.season && t == last) || !self.teams[last].form.ends_with("DDD") { continue; }
+                    if self.rng.f64() < 0.6 {
+                        let coach = gen_player_name(&mut self.rng);
+                        self.press.sacked.push((self.season, last));
+                        add("demissao", format!("{} demite o técnico {}", n(self, last), coach), format!("Lanterna da Divisão {} e com três derrotas seguidas, o {} anunciou a saída do treinador.", d + 1, n(self, last)), 40);
+                    }
+                }
+            }
+        }
+        // transferências da rodada
+        let start = self.press.transfers_seen.min(self.transfers.len());
+        let fresh: Vec<TransferRec> = self.transfers[start..].iter().filter(|t| t.fee > 0).cloned().collect();
+        if let Some(t) = fresh.iter().max_by_key(|t| t.fee) {
+            let from = t.from.map(|f| n(self, f)).unwrap_or("sem clube".into());
+            add("transferencia", format!("Mercado: {} troca o {} pelo {}", t.name, from, n(self, t.to)), format!("Negócio de {}.{}", fmt_money(t.fee),
+                if fresh.len() > 1 { format!(" Outras {} transferências movimentaram o mercado.", fresh.len() - 1) } else { String::new() }), 30 + if me == Some(t.to) || me == t.from { 40 } else { 0 });
+        }
+        self.press.transfers_seen = self.transfers.len();
+        // rumores: verdadeiros (propostas reais) e falsos
+        let mut rumors = vec![];
+        if let Some(o) = self.offers.first() {
+            rumors.push(Rumor { title: format!("{} de olho em {}?", n(self, o.club), self.players[o.player].name), text: format!("Fontes garantem que o {} já fez contato para levar {}.", n(self, o.club), self.players[o.player].name), truth: true });
+        }
+        if self.rng.f64() < 0.7 {
+            let stars: Vec<usize> = self.players.iter().filter(|p| p.team.is_some() && !p.academy && p.skill >= 70).map(|p| p.id).collect();
+            if !stars.is_empty() {
+                let pid = *self.rng.pick(&stars);
+                let club = self.rng.range(0, self.teams.len() as i64 - 1) as usize;
+                if Some(club) != self.players[pid].team {
+                    rumors.push(Rumor { title: format!("{} no {}?", self.players[pid].name, n(self, club)), text: format!("Um empresário teria oferecido {} ao {}. O clube nega.", self.players[pid].name, n(self, club)), truth: false });
+                }
+            }
+        }
+        // humor da diretoria e da torcida
+        let mood = match me {
+            Some(m) => {
+                let div = self.teams[m].division;
+                let pos = self.table(div).iter().position(|&t| t == m).unwrap_or(0) as i32 + 1;
+                let exp = self.expected.get(m).copied().unwrap_or(8) as i32 + 1;
+                let morale = self.team_morale(m);
+                let (t, x) = if pos <= exp - 3 { ("Torcida em festa", format!("Em {}º, bem acima do esperado ({}º), a diretoria fala em renovar com o técnico.", pos, exp)) }
+                    else if pos <= exp + 1 { ("Diretoria tranquila", format!("O clube está em {}º, dentro do previsto ({}º).", pos, exp)) }
+                    else if pos <= exp + 4 { ("Torcida impaciente", format!("Em {}º (esperado: {}º), começam as vaias no estádio.", pos, exp)) }
+                    else { ("Diretoria pressiona o técnico", format!("A {}ª colocação (esperado: {}º) irrita os conselheiros. O cargo está em risco.", pos, exp)) };
+                Article { kind: "humor".into(), title: format!("{}: {}", n(self, m), t), text: format!("{} Moral do elenco: {}.", x, morale), score: 0 }
+            }
+            None => Article::default(),
+        };
+        arts.sort_by(|a, b| b.score.cmp(&a.score));
+        // variedade: no máximo 2 notas do mesmo tipo
+        let mut per: std::collections::HashMap<String, usize> = Default::default();
+        arts.retain(|a| { let c = per.entry(a.kind.clone()).or_default(); *c += 1; *c <= 2 || a.kind == "seu_jogo" });
+        let headline = if arts.is_empty() { Article { kind: "geral".into(), title: "Rodada sem surpresas".into(), text: "Os favoritos fizeram a sua parte.".into(), score: 0 } } else { arts.remove(0) };
+        arts.truncate(9);
+        self.press.next_number += 1;
+        let label = if is_cup { format!("Copa Nacional — {}", cup_name) } else { format!("Divisões 1–4 — {}ª rodada", self.round + 1) };
+        let ed = Edition { number: self.press.next_number, season: self.season, round: self.round, cup: is_cup, label, headline, articles: arts, rumors, mood };
+        self.press.editions.push(ed);
+        if self.press.editions.len() > MAX_EDITIONS { self.press.editions.remove(0); }
+        self.press.unseen = self.managed.is_some();
+    }
+    pub fn edition_json(&self, number: Option<u32>) -> serde_json::Value {
+        let e = match number { Some(n) => self.press.editions.iter().find(|e| e.number == n), None => self.press.editions.last() };
+        let Some(e) = e else { return serde_json::Value::Null };
+        serde_json::json!({"paper": NEWSPAPER, "number": e.number, "season": e.season, "round": e.round, "cup": e.cup, "label": e.label,
+            "headline": e.headline, "articles": e.articles, "mood": e.mood,
+            "rumors": e.rumors.iter().map(|r| serde_json::json!({"title": r.title, "text": r.text})).collect::<Vec<_>>(),
+            "archive": self.press.editions.iter().rev().map(|x| serde_json::json!({"number": x.number, "season": x.season, "label": x.label, "title": x.headline.title})).collect::<Vec<_>>()})
     }
 
     fn apply_result(&mut self, r: &MatchResult) {
@@ -1955,7 +2136,7 @@ impl Game {
             "fired": self.fired, "jobOffers": self.job_offers().iter().map(|&t| serde_json::json!({"id": t, "name": self.teams[t].name, "division": self.teams[t].division, "budget": self.teams[t].budget})).collect::<Vec<_>>(),
             "managed": managed, "teams": teams, "news": self.news, "formations": FORMATIONS,
             "reportPending": self.report_pending, "report": self.last_report, "history": self.history,
-            "market": self.market_state_json(), "dayType": if cup_day { "cup" } else { "league" }, "cupRoundName": CUP_ROUND_NAMES[self.cup.round.min(CUP_ROUNDS - 1)], "cup": self.cup_json(),
+            "market": self.market_state_json(), "journal": {"paper": NEWSPAPER, "unseen": self.press.unseen, "latest": self.press.editions.last().map(|e| e.number)}, "dayType": if cup_day { "cup" } else { "league" }, "cupRoundName": CUP_ROUND_NAMES[self.cup.round.min(CUP_ROUNDS - 1)], "cup": self.cup_json(),
             "expected": self.managed.and_then(|m| self.expected.get(m).copied()), "promoted": PROMOTED, "teamsPerDiv": TEAMS_PER_DIV,
             "scorers": scorers.iter().take(15).map(|p| self.player_json(p)).collect::<Vec<_>>()})
     }
@@ -2086,6 +2267,9 @@ impl FutManager {
     /// O usuário viu o sorteio da Copa.
     pub fn ack_cup_draw(&mut self) { self.g.cup.draw_pending = false; }
     pub fn ack_offers(&mut self) { self.g.offers_unseen = false; }
+    pub fn ack_journal(&mut self) { self.g.press.unseen = false; }
+    /// Edição do jornal (0 = a mais recente).
+    pub fn journal(&self, number: u32) -> String { self.g.edition_json(if number == 0 { None } else { Some(number) }).to_string() }
     pub fn negotiate(&mut self, id: usize, offer: f64) -> String {
         match self.g.managed { Some(m) => match self.g.negotiate(m, id, offer as i64) { Ok(v) => serde_json::json!({"ok": v["status"] == "accepted", "status": v["status"], "msg": v["msg"], "counter": v["counter"]}).to_string(), Err(e) => res(Err(e)) }, None => res(Err("Nenhum time".into())) }
     }
@@ -3124,6 +3308,37 @@ mod copa {
                 done = true; break;
             } }
             assert!(done);
+        }
+    }
+
+    mod jornal {
+        use super::super::*;
+        #[test]
+        fn editions_every_day_with_variety() {
+            let mut g = Game::new(4242); g.managed = Some(10);
+            for _ in 0..(ROUNDS + 1) { g.play_round(); }
+            let eds = &g.press.editions;
+            assert!(eds.len() >= ROUNDS, "edições: {}", eds.len());
+            assert!(eds.iter().any(|e| e.cup), "sem edição de Copa");
+            let kinds: std::collections::BTreeSet<String> = eds.iter().flat_map(|e| std::iter::once(e.headline.kind.clone()).chain(e.articles.iter().map(|a| a.kind.clone()))).collect();
+            for k in ["goleada", "zebra", "hattrick", "vermelho", "tabela", "copa", "seu_jogo"] { assert!(kinds.contains(k), "falta {k}: {kinds:?}"); }
+            assert!(eds.iter().all(|e| !e.mood.title.is_empty()));
+            let numbers: Vec<u32> = eds.iter().map(|e| e.number).collect();
+            assert!(numbers.windows(2).all(|w| w[1] == w[0] + 1));
+            assert!(g.press.unseen);
+        }
+        #[test]
+        fn rumors_true_and_false_and_sackings() {
+            let mut g = Game::new(99); g.managed = Some(3);
+            let mut t = 0; let mut f = 0;
+            for _ in 0..(ROUNDS * 2) { g.play_round(); if let Some(e) = g.press.editions.last() { for r in &e.rumors { if r.truth { t += 1 } else { f += 1 } } } }
+            assert!(t > 0 && f > 0, "rumores verdadeiros {t} falsos {f}");
+            assert!(!g.press.sacked.is_empty(), "nenhuma demissão");
+            assert!(g.press.editions.len() <= MAX_EDITIONS);
+            let j = g.edition_json(None);
+            assert_eq!(j["paper"], NEWSPAPER);
+            assert!(j["archive"].as_array().unwrap().len() > 10);
+            assert!(j["rumors"][0].get("truth").is_none(), "verdade dos rumores não pode vazar");
         }
     }
 }

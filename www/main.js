@@ -1,6 +1,7 @@
 import init, { FutManager } from '../pkg/futmanager.js';
 import { initDesktop, openAbout } from './desktop.js';
 import { openCup, openDraw, animateShootout } from './cup.js';
+import { openJornal } from './jornal.js';
 import { windowLabel, windowBanner, openOffers, openNegotiation, auctionHtml, openTransfers } from './market.js';
 import { initWM, openWindow, closeWindow, getWindow, closeWhere, tbtn, manageMain } from './wm.js';
 import { openFinale, finaleOpen, renderLiveTable, renderHistory, isFinalStretch } from './finale.js';
@@ -238,7 +239,7 @@ initWM();
 $('#mainBtns').innerHTML = tbtn('min', 'wm-min') + tbtn('max', 'wm-max') + tbtn('close', 'wm-close', true);
 const mainWin = manageMain($('#app'), '⚽ FutManager 98');
 let gameVersion = '';
-document.querySelectorAll('.menubar [data-tab]').forEach((b) => b.onclick = () => { if (b.dataset.tab === 'historico') { openHistory(); return; } if (b.dataset.tab === 'copa') { openCup(st); return; } if (!playing) { tab = b.dataset.tab; render(); } });
+document.querySelectorAll('.menubar [data-tab]').forEach((b) => b.onclick = () => { if (b.dataset.tab === 'historico') { openHistory(); return; } if (b.dataset.tab === 'copa') { openCup(st); return; } if (b.dataset.tab === 'jornal') { showJornal(); return; } if (!playing) { tab = b.dataset.tab; render(); } });
 initTeams({ game: () => game, getState: () => st, refresh: () => { refresh(); }, flash, canAct: () => !playing });
 
 
@@ -267,6 +268,12 @@ function render() {
   if (st.reportPending && !playing) showFinale();
   else if (st.cup && st.cup.drawPending && !playing) showDraw();
   else if (st.market.unseen && st.market.offers.length && !playing && !getWindow('sorteio')) openOffers(st, mctx);
+  if (st.journal.unseen && !playing && !st.reportPending && !getWindow('jornal')) showJornal();
+}
+function showJornal(n = 0) {
+  const w = openJornal((k) => JSON.parse(game.journal(k)), n);
+  if (!w) { flash({ ok: false, msg: 'O Placar Diário ainda não publicou nenhuma edição: jogue uma rodada.' }); return; }
+  game.ack_journal(); st.journal.unseen = false;
 }
 const mctx = { get game() { return game; }, refresh: () => refresh(), flash: (r) => flash(r) };
 function showDraw() {
@@ -896,6 +903,28 @@ if (location.search.includes('selftest')) (async () => {
       if (shown.join(',') !== '1,2,3,4' || !soundLog.includes('disputa_gol') || !soundLog.includes('disputa_perdido') || !soundLog.includes('penalti')) throw 'animação dos pênaltis: ' + shown + ' / ' + soundLog;
       setSpeed('normal');
       out.push('copa=ok');
+    {
+      closeWindow('jornal');
+      game.play_round(); refresh();
+      if (!getWindow('jornal')) throw 'jornal: não abriu após a rodada';
+      const jw = getWindow('jornal');
+      const q = (sel) => jw.body ? jw.body.querySelector(sel) : document.querySelector('#jornal ' + sel);
+      if (!/O Placar Diário/.test(q('.jn-mast').textContent)) throw 'jornal: cabeçalho';
+      if (!q('.jn-head h2').textContent.trim()) throw 'jornal: manchete vazia';
+      if (!q('.jn-box')) throw 'jornal: humor/rumores';
+      const e = JSON.parse(game.journal(0));
+      if (e.archive.length < 3) throw 'jornal: arquivo curto ' + e.archive.length;
+      if (e.rumors.some((r) => 'truth' in r)) throw 'jornal: rumor revela a verdade';
+      if (JSON.parse(game.state()).journal.unseen) throw 'jornal: não marcou como lido';
+      q('#jnPrev').click();
+      const prev = getWindow('jornal');
+      if (!(prev.body || document).querySelector('.jn-mast').textContent.includes('Nº ' + (e.number - 1))) throw 'jornal: arquivo/anterior';
+      closeWindow('jornal');
+      document.querySelector('.menubar [data-tab=jornal]').click();
+      if (!getWindow('jornal')) throw 'jornal: aba Jornal';
+      closeWindow('jornal');
+      out.push('jornal=ok');
+    }
     }
     // reta final: joga até a última rodada e assiste ao vivo (tabela "se terminasse agora")
     while (JSON.parse(game.state()).round < 28) game.play_round();
@@ -982,4 +1011,12 @@ if (location.search.includes('mercado')) {
   closeWhere(() => true);
   mkMax = '4000000';
   tab = 'mercado'; refresh();
+}
+// Demonstração do jornal: index.html?jornal joga 8 rodadas e abre a última edição.
+if (location.search.includes('jornal')) {
+  $('#btnNew').click();
+  document.querySelector('#teamList button').click();
+  for (let i = 0; i < 8; i++) game.play_round();
+  closeWhere(() => true);
+  tab = 'clube'; refresh();
 }

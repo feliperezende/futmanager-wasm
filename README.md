@@ -123,3 +123,7 @@ Mata-mata com os 64 clubes em 6 fases (datas no meio da semana entre rodadas). J
 ## Mercado mais vivo
 
 Janelas de transferência na pré-temporada (rodadas 1–4) e no meio da temporada (rodadas 15–18), com contagem regressiva na barra de status; fora delas só jogadores sem clube. Clubes da IA fazem propostas pelos seus jogadores (aceitar, recusar ou contrapropor). Comprar de outro clube exige negociação: contrapropostas, e peças-chave podem não estar à venda. Leilões ocasionais de clubes endividados e transferências entre clubes da IA registradas. Demonstração: `www/?mercado`.
+
+## Jornal da rodada
+
+*O Placar Diário* sai após cada rodada (e cada dia de Copa) numa janela com visual de jornal antigo e arquivo das edições anteriores (aba 'Jornal'). Manchetes geradas pelos eventos: goleadas, zebras, hat-tricks, pênaltis, expulsões, mudanças na tabela, Copa, transferências, rumores (alguns verdadeiros, outros não), humor da diretoria e da torcida e demissões de técnicos de outros clubes. Demonstração: `www/?jornal`.
