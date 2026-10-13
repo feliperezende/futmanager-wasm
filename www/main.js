@@ -2,7 +2,7 @@ import init, { FutManager } from '../pkg/futmanager.js';
 import { initDesktop, openAbout } from './desktop.js';
 import { openCup, openDraw, animateShootout } from './cup.js';
 import { openJornal } from './jornal.js';
-import { createPitch } from './pitch.js';
+import { createPitch, SHOOT_DELAY } from './pitch.js';
 import { windowLabel, windowBanner, openOffers, openNegotiation, auctionHtml, openTransfers } from './market.js';
 import { initWM, openWindow, closeWindow, getWindow, closeWhere, tbtn, manageMain } from './wm.js';
 import { openFinale, finaleOpen, renderLiveTable, renderHistory, isFinalStretch } from './finale.js';
@@ -474,7 +474,7 @@ function startTimer() {
       if (shootMatch && shootReveal === 0) {
         clearInterval(liveTimer);
         $('#btnPause').classList.add('hidden');
-        animateShootout(shootMatch.events, (n) => { shootReveal = n; showLive(JSON.parse(game.live())); }, getSpeed(), () => { shootReveal = Infinity; finishLive(); });
+        animateShootout(shootMatch.events, (n) => { shootReveal = n; showLive(JSON.parse(game.live())); }, getSpeed(), () => { shootReveal = Infinity; finishLive(); }, pitchShown() ? SHOOT_DELAY[getSpeed()] : 0);
       } else finishLive();
     }
     else if (minute === 45 && !halftimeDone) {
@@ -969,8 +969,11 @@ if (location.search.includes('selftest')) (async () => {
       const kicks = [{ kind: 'disputa_inicio', side: 0, text: 'x' }, { kind: 'disputa_gol', side: 0, text: real.on[0][10].name + ' converte' }, { kind: 'disputa_perdido', side: 1, text: real.on[1][10].name + ' chuta para fora' },
         { kind: 'disputa_gol', side: 0, text: 'y converte' }, { kind: 'disputa_fim', side: 0, text: 'fim' }];
       const sm = { ...fake, minute: 120, over: true, pens: [2, 0], events: kicks.map((k) => ({ minute: 120, ...k })) };
-      for (let n = 1; n <= kicks.length; n++) { tp.update(sm, { shootout: true, shootReveal: n }); await new Promise((r) => setTimeout(r, 120)); }
-      if (!(await wait(() => tp.debug().kicks === 3 && !tp.busy(), 6000)) || tp.debug().pens.join() !== '2,0') throw 'campinho: disputa ' + JSON.stringify(tp.debug());
+      tp.update(sm, { shootout: true, shootReveal: 1 });
+      if (tp.debug().walker !== real.on[0][10].id) throw 'campinho: 1º cobrador não saiu do círculo';
+      for (let n = 2; n <= kicks.length; n++) { await new Promise((r) => setTimeout(r, 900)); tp.update(sm, { shootout: true, shootReveal: n }); }
+      if (!(await wait(() => tp.debug().kicks === 3 && !tp.busy(), 12000)) || tp.debug().pens.join() !== '2,0') throw 'campinho: disputa ' + JSON.stringify(tp.debug());
+      if (tp.debug().maxSpeed > 95) throw 'campinho: jogador teleportou ' + tp.debug().maxSpeed;
       tp.setActive(false);
       // Rápido: campinho oculto e sem segurar o relógio
       $('#speed').value = 'rapido'; $('#speed').onchange({ target: { value: 'rapido' } });

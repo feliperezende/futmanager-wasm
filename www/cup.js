@@ -44,10 +44,10 @@ export function openDraw(st, onAck) {
 }
 
 /** Revela a disputa por pênaltis cobrança a cobrança, com sons; chama onDone ao final. */
-export function animateShootout(events, render, speed, onDone) {
+export function animateShootout(events, render, speed, onDone, delayMs) {
   const kicks = events.filter((e) => e.kind.startsWith('disputa'));
   let i = 0;
-  const delay = speed === 'lento' ? 1300 : 800;
+  const delay = delayMs || (speed === 'lento' ? 1300 : 800);
   const next = () => {
     if (i >= kicks.length) { onDone(); return; }
     const e = kicks[i++];

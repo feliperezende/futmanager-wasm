@@ -22,6 +22,9 @@ function shortName(name) {
   return (w[0] || plain(name)).slice(0, 4);
 }
 
+/** Intervalo entre cobranças quando o campinho está visível (dá tempo de caminhar até a marca). */
+export const SHOOT_DELAY = { normal: 2000, lento: 2800 };
+
 export function createPitch(canvas, opts) {
   const cx = canvas.getContext('2d');
   const { sfx, getSpeed } = opts;
@@ -54,8 +57,9 @@ export function createPitch(canvas, opts) {
   let queue = [], anim = null, banners = [], raf = 0, last = 0, clock = 0, active = false;
   let poss = 0, prog = 0, ballY = MIDY, phase = 'kickoff', phaseT = 0, kickSide = 0;
   const ball = { x: MIDX, y: MIDY, z: 0 }, pos = new Map(), ghosts = new Map();
-  const stats = { frames: 0, goals: 0, kicks: 0, goalSounds: 0, anims: [] };
+  const stats = { maxSpeed: 0, frames: 0, goals: 0, kicks: 0, goalSounds: 0, anims: [] };
   let shake = [0, 0], postFlash = 0, crowdFlash = 0, pens = [0, 0];
+  const shoot = { walker: -1, nextSide: 0 };
 
   const half = () => (minute > 105 ? 4 : minute > 90 ? 3 : minute > 45 || (ctxInfo.halftimeDone && minute >= 45) ? 2 : 1);
   // mandante ataca para a direita no 1º tempo (e no 1º tempo da prorrogação); disputa por pênaltis: gol da direita
@@ -168,7 +172,7 @@ export function createPitch(canvas, opts) {
         if (q > 0.95 && !a.hit) { a.hit = true; if (a.how === 'trave') { postFlash = 0.5; } }
       } else { const q = (k - 0.72) / 0.28; ball.z = 0; ball.x = lerp(gx - d * (a.how === 'defesa' ? 6 : 0), gx - d * 30, q); ball.y = MIDY + 11 + q * 30; }
     } else if (a.kind === 'penalti' || a.kind === 'kick') {
-      const spot = gx - d * 30, ko = a.kind === 'kick' ? 0.25 : 0.55;
+      const spot = gx - d * 30, ko = a.kind === 'kick' ? 0.3 : 0.55;
       if (k < ko) { ball.x = spot; ball.y = MIDY; }
       else if (k < ko + 0.1) {
         const q = (k - ko) / 0.1, tx = a.scored ? gx + d * 4 : a.how === 'defesa' ? gx - d * 4 : gx + d * 2, ty = a.scored ? MIDY - 6 : a.how === 'defesa' ? MIDY + 5 : MIDY - 16;
@@ -287,10 +291,15 @@ export function createPitch(canvas, opts) {
     // jogadores caminham até o alvo
     for (const [id, t] of tg) {
       const p = pos.get(id);
-      if (!p) { pos.set(id, [t[0], t[1]]); continue; }
-      const sp = (phase === 'off' ? 30 : (ctxInfo.shootout || (anim && (anim.kind === 'penalti' || anim.kind === 'kick'))) ? 260 : 70) * dt;
-      p[0] += clamp(t[0] - p[0], -sp, sp) + Math.sin(clock * 1.3 + id) * 0.03;
-      p[1] += clamp(t[1] - p[1], -sp, sp);
+      if (!p) { pos.set(id, [t[0], t[1], 0, 0]); continue; }
+      // caminhada natural: velocidade limitada, acelera e freia suavemente (sem teleporte)
+      const vmax = phase === 'off' ? 30 : ctxInfo.shootout ? 55 : (anim && anim.kind === 'penalti') ? 90 : 75;
+      const dx = t[0] - p[0], dy = t[1] - p[1], dist = Math.hypot(dx, dy);
+      const want = Math.min(vmax, dist * 2.5), wx = dist > 0.01 ? dx / dist * want : 0, wy = dist > 0.01 ? dy / dist * want : 0;
+      const acc = 160 * dt;
+      p[2] = (p[2] || 0) + clamp(wx - (p[2] || 0), -acc, acc); p[3] = (p[3] || 0) + clamp(wy - (p[3] || 0), -acc, acc);
+      p[0] += p[2] * dt; p[1] += p[3] * dt;
+      if (dt > 0) stats.maxSpeed = Math.max(stats.maxSpeed, Math.hypot(p[2], p[3]));
     }
   }
   function penaltyTargets(a) {
@@ -298,10 +307,19 @@ export function createPitch(canvas, opts) {
     const k = a ? a.t / a.dur : 0;
     lineups().forEach((xi, s) => xi.forEach((p, i) => {
       if (ctxInfo.shootout) {
-        // disputa: todos no círculo central, só o cobrador e o goleiro adversário na área
-        let x = MIDX - 18 + (i % 6) * 7, y = MIDY + (s ? 12 : -12) + Math.floor(i / 6) * 5;
-        if (a && s === side && p.id === a.kicker) { const run = clamp((k - 0.05) / 0.2, 0, 1); x = spot - d * lerp(14, 3, run); y = MIDY + lerp(5, 1, run); }
-        if (p.pos === 'G' && s !== side) { x = gx - d * 3; y = MIDY + (a && k > 0.25 ? (a.scored ? -1 : 1) * clamp((k - 0.25) / 0.1, 0, 1) * 8 : 0); }
+        // disputa: elencos agrupados no círculo central (uma fileira por time); o próximo cobrador caminha até a marca
+        // enquanto o resultado da cobrança anterior aparece; os goleiros se revezam no gol.
+        const nextSide = a ? a.side : shoot.nextSide, sgx = PX.r, spt = PX.r - 30;
+        const row = xi.filter((q) => q.pos !== 'G'), j = row.indexOf(p);
+        let x = MIDX - 18 + (j % 5) * 8 + (j >= 5 ? 4 : 0), y = MIDY + (s ? 9 : -9) + (j >= 5 ? (s ? 6 : -6) : 0);
+        if (p.pos === 'G') {
+          if (s !== nextSide) { x = sgx - 3; y = MIDY + (a && k > 0.3 ? (a.scored ? -1 : 1) * clamp((k - 0.3) / 0.12, 0, 1) * 8 : 0); }
+          else { x = MIDX + 28; y = MIDY + (s ? 6 : -6); }            // goleiro do time que bate espera ao lado do grupo
+        } else if (a && s === side && p.id === a.kicker) {
+          const run = clamp((k - 0.05) / 0.25, 0, 1); x = spt - lerp(10, 2, ease(run)); y = MIDY + lerp(4, 1, run);
+        } else if (p.id === shoot.walker && s === shoot.nextSide && (!a || a.kicker !== p.id)) {
+          x = spt - 12; y = MIDY + 6;                                  // próximo cobrador aguarda perto da marca
+        }
         out.set(p.id, [x, y, s]); return;
       }
       let x, y;
@@ -348,7 +366,11 @@ export function createPitch(canvas, opts) {
       }
       // disputa por pênaltis: cobrança a cobrança, conforme o jogo revela
       if (info.shootout) {
-        const kicks = match.events.filter((e) => e.kind.startsWith('disputa')).slice(0, info.shootReveal === Infinity ? 999 : info.shootReveal);
+        const all = match.events.filter((e) => e.kind.startsWith('disputa'));
+        const kicks = all.slice(0, info.shootReveal === Infinity ? 999 : info.shootReveal);
+        // próximo cobrador (ainda não revelado) já sai do círculo central
+        const nx = all.slice(kicks.length).find((e) => e.kind === 'disputa_gol' || e.kind === 'disputa_perdido');
+        if (nx) { const q = findPlayer(nx.text); shoot.walker = q ? q.id : -1; shoot.nextSide = nx.side; } else shoot.walker = -1;
         for (let i = kicksSeen; i < kicks.length; i++) {
           const e = kicks[i];
           if (e.kind === 'disputa_inicio') { banners.push({ msg: 'PENALTIS', t: 0, dur: 1.2, col: C.yel }); phase = 'play'; continue; }
@@ -357,7 +379,7 @@ export function createPitch(canvas, opts) {
           const scored = e.kind === 'disputa_gol';
           if (scored) pens[e.side]++;
           stats.kicks++;
-          queue.push({ kind: 'kick', side: e.side, kicker: pl ? pl.id : -1, scored, how: /defende|goleiro/.test(e.text) ? 'defesa' : 'fora', dur: (getSpeed() === 'lento' ? 1.2 : 0.75) });
+          queue.push({ kind: 'kick', side: e.side, kicker: pl ? pl.id : -1, scored, how: /defende|goleiro/.test(e.text) ? 'defesa' : 'fora', dur: SHOOT_DELAY[getSpeed() === 'lento' ? 'lento' : 'normal'] / 1000 * 0.85 });
         }
         kicksSeen = kicks.length;
       }
@@ -370,7 +392,7 @@ export function createPitch(canvas, opts) {
     /** Uma animação de lance está em andamento: o relógio da partida espera. */
     busy() { return active && getSpeed() !== 'rapido' && (!!anim || queue.length > 0 || (phase === 'kickoff' && phaseT < 0.9 * scale() && minute > 0)); },
     reset() { m = null; queue = []; anim = null; banners = []; pos.clear(); ghosts.clear(); phase = 'kickoff'; },
-    debug() { return { ...stats, anim: anim && anim.kind, queue: queue.length, phase, active, pens: [...pens] }; },
+    debug() { return { ...stats, walker: shoot.walker, anim: anim && anim.kind, queue: queue.length, phase, active, pens: [...pens] }; },
     frameNow() { update(0); draw(); },
   };
 }
