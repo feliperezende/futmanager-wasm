@@ -149,7 +149,7 @@ export function createPitch(canvas, opts) {
     anim = { ...a, t: 0 }; stats.anims.push(a.kind); if (stats.anims.length > 50) stats.anims.shift();
     if (a.kind === 'gol' || a.kind === 'chance') { poss = a.side; anim.from = [ball.x, ball.y]; }
     if (a.kind === 'penalti' || a.kind === 'kick') poss = a.side;
-    if ((a.kind === 'cartao' || a.kind === 'lesao') && pos.has(a.who.id)) ghosts.set(a.who.id, [...pos.get(a.who.id), a.who.side]);
+    if ((a.kind === 'cartao' || a.kind === 'lesao') && pos.has(a.who.id)) { const q = pos.get(a.who.id); ghosts.set(a.who.id, [q[0], q[1], a.who.side]); } // pos guarda [x, y, vx, vy]: o lado vai no índice 2
   }
   function finishAnim() {
     const a = anim; anim = null;
@@ -335,7 +335,8 @@ export function createPitch(canvas, opts) {
     raf = 0;
     if (!active || document.hidden) return;
     const dt = Math.min(0.1, (now - (last || now)) / 1000); last = now;
-    update(dt); draw();
+    // um erro de desenho não pode parar o laço (o relógio da partida espera por busy())
+    try { update(dt); draw(); } catch (e) { console.error('campinho:', e); stats.errors = (stats.errors || 0) + 1; anim = null; queue = []; ghosts.clear(); }
     raf = requestAnimationFrame(loop);
   }
   function run() { if (active && !document.hidden && !raf) { last = 0; raf = requestAnimationFrame(loop); } }
@@ -391,8 +392,12 @@ export function createPitch(canvas, opts) {
     setActive(on) { active = on; if (on) run(); },
     /** Uma animação de lance está em andamento: o relógio da partida espera. */
     busy() { return active && getSpeed() !== 'rapido' && (!!anim || queue.length > 0 || (phase === 'kickoff' && phaseT < 0.9 * scale() && minute > 0)); },
+    /** Solta o relógio: descarta a animação atual e a fila (rede de segurança do laço da partida). */
+    release() { anim = null; queue = []; ghosts.clear(); if (phase === 'kickoff') phaseT = 9; },
     reset() { m = null; queue = []; anim = null; banners = []; pos.clear(); ghosts.clear(); phase = 'kickoff'; },
     debug() { return { ...stats, walker: shoot.walker, anim: anim && anim.kind, queue: queue.length, phase, active, pens: [...pens] }; },
     frameNow() { update(0); draw(); },
+    /** Testes: avança a animação em passos de 1/60 s (sem depender do requestAnimationFrame). */
+    advance(sec) { for (let t = 0; t < sec; t += 1 / 60) { update(1 / 60); draw(); } },
   };
 }

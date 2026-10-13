@@ -441,7 +441,7 @@ function showLive(live) {
   $('#ticker').innerHTML = (halftime ? '<div class="gol">⏸ INTERVALO — faça substituições ou mude a tática e clique em "Iniciar 2º tempo".</div>' : '') +
     (myMatch ? lines.map((e) => `<div class="${e.kind}" data-m="${myMatch.home}">${String(e.minute).padStart(2, '0')}' ${esc(e.text)}</div>`).join('')
       : (live.length ? '<div>Seu clube não joga nesta rodada. Acompanhe os placares na lista ao lado.</div>' : ''));
-  if (pitch) pitch.update(myMatch, { halftime, halftimeDone, shootout: !!(myMatch && myMatch.pens), shootReveal, skip: skipping });
+  if (pitch) try { pitch.update(myMatch, { halftime, halftimeDone, shootout: !!(myMatch && myMatch.pens), shootReveal, skip: skipping }); } catch (e) { console.error('campinho:', e); }
   if (typeof renderSubs === 'function') renderSubs(myMatch);
   renderLiveTable(st, live);
   const of = document.getElementById('onfield');
@@ -467,11 +467,28 @@ function startSecondHalf() {
   $('#btnHalf').classList.add('hidden'); $('#btnPause').classList.remove('hidden');
   startTimer();
 }
+// O campinho segura o relógio durante um lance, mas nunca por mais que PITCH_HOLD_MAX ms seguidos:
+// se a animação travar (erro, aba oculta, sprite sumido), o jogo segue e a animação é descartada.
+const PITCH_HOLD_MAX = 6000;
+let holdSince = 0;
+function pitchHolds() {
+  let busy = false;
+  try { busy = !!(pitch && pitch.busy()); } catch (e) { console.error('campinho:', e); }
+  if (!busy) { holdSince = 0; return false; }
+  const now = performance.now();
+  if (!holdSince) holdSince = now;
+  if (now - holdSince < PITCH_HOLD_MAX) return true;
+  console.warn('campinho: animação segurou o relógio por mais de ' + PITCH_HOLD_MAX + ' ms; liberando');
+  try { pitch.release(); } catch (e) { console.error('campinho:', e); }
+  holdSince = 0;
+  return false;
+}
 function startTimer() {
   clearInterval(liveTimer);
   if (halftime) return;
   liveTimer = setInterval(() => {
-    if (paused || (pitch && pitch.busy())) return;
+    if (paused) return;
+    if (pitchHolds()) return;
     const minute = showLive(JSON.parse(game.step(1)));
     if (liveDone) {
       if (shootMatch && shootReveal === 0) {
@@ -980,6 +997,26 @@ if (location.search.includes('selftest')) (async () => {
       for (let n = 2; n <= kicks.length; n++) { await new Promise((r) => setTimeout(r, 900)); tp.update(sm, { shootout: true, shootReveal: n }); }
       if (!(await wait(() => tp.debug().kicks === 3 && !tp.busy(), 12000)) || tp.debug().pens.join() !== '2,0') throw 'campinho: disputa ' + JSON.stringify(tp.debug());
       if (tp.debug().maxSpeed > 95) throw 'campinho: jogador teleportou ' + tp.debug().maxSpeed;
+      // lesão + substituição automática no mesmo minuto (o lesionado já saiu de campo): o relógio não pode travar
+      {
+        const hurt = real.on[0][4], inn = { ...real.on[0][4], id: 999999, name: 'Reserva Teste' };
+        const evs = [{ minute: 70, side: 0, kind: 'lesao', text: hurt.name + ' se lesiona (5 rodada(s) fora)' },
+          { minute: 70, side: 0, kind: 'substituicao', text: `Substituição: sai ${hurt.name}, entra Reserva Teste` }];
+        const on0 = real.on[0].map((p) => (p.id === hurt.id ? inn : p));
+        const base = { ...real, minute: 69, hg: 0, ag: 1, over: false, pens: null, events: [] };
+        const t3 = createPitch(document.createElement('canvas'), { sfx: () => {}, getSpeed: () => 'normal' });
+        t3.setActive(true); t3.update(base, { halftimeDone: true });
+        await wait(() => !t3.busy(), 3000);
+        let mm = 70;
+        for (; mm <= 90; mm++) {
+          t3.update({ ...base, minute: mm, over: mm === 90, on: [on0, real.on[1]], outPlayers: [{ id: hurt.id, name: hurt.name, pos: hurt.pos, team: real.home }], events: evs }, { halftimeDone: true });
+          if (mm === 70 && t3.debug().anim !== 'lesao' && !t3.debug().queue) throw 'campinho: lesão sem animação';
+          if (!(await wait(() => !t3.busy(), 4000))) throw `campinho: relógio travado no ${mm}' após lesão + substituição ${JSON.stringify(t3.debug())}`;
+        }
+        t3.setActive(false);
+        if (t3.debug().errors) throw 'campinho: erro de desenho na lesão';
+        out.push('lesao_sub=ok');
+      }
       tp.setActive(false);
       // Rápido: campinho oculto e sem segurar o relógio
       $('#speed').value = 'rapido'; $('#speed').onchange({ target: { value: 'rapido' } });
