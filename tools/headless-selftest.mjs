@@ -22,6 +22,7 @@ try {
   let id = 0; const pending = new Map();
   ws.addEventListener('message', (ev) => { const m = JSON.parse(ev.data); if (pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); } });
   const send = (method, params = {}) => new Promise((r) => { pending.set(++id, r); ws.send(JSON.stringify({ id, method, params })); });
+  if (process.env.CONSOLE) { await send('Runtime.enable'); ws.addEventListener('message', (ev) => { const m = JSON.parse(ev.data); if (m.method === 'Runtime.consoleAPICalled') console.log('[console]', m.params.args.map((a) => a.value).join(' ')); }); }
   await send('Page.navigate', { url });
   let text = '';
   for (let i = 0; i < 120 && !text; i++) {

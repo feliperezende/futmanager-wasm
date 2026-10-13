@@ -68,7 +68,10 @@ function refresh() { st = JSON.parse(game.state()); render(); }
 // ------------------------------------------------ Início
 function showStart() { $('#status').innerHTML = ''; anySave().then((v) => { $('#btnLoad').disabled = !v; }); $('#start').classList.remove('hidden'); $('#main').classList.add('hidden'); $('#pickTeam').classList.add('hidden'); }
 $('#btnNew').onclick = () => {
-  game = new FutManager(Math.floor(Math.random() * 1e9));
+  const qs = new URLSearchParams(location.search).get('seed');
+  const seed = qs !== null && /^\d+$/.test(qs) ? +qs : Math.floor(Math.random() * 1e9);
+  window.__seed = seed; console.log('seed=' + seed);
+  game = new FutManager(seed);
   st = JSON.parse(game.state());
   const sel = $('#pickDiv');
   sel.innerHTML = [0, 1, 2, 3].map((d) => `<option value="${d}">Divisão ${d + 1}</option>`).join('');
@@ -670,7 +673,7 @@ if (location.search.includes('selftest')) (async () => {
   try {
     $('#btnNew').click();
     document.querySelector('#teamList button').click();
-    out.push('time=' + st.managed.name);
+    out.push('seed=' + window.__seed, 'time=' + st.managed.name);
     // janela principal: arrastar, minimizar/restaurar, maximizar/restaurar, posição salva
     {
       const app = $('#app'), bar = app.querySelector('.titlebar');
@@ -870,8 +873,11 @@ if (location.search.includes('selftest')) (async () => {
     out.push('estadio=ok');
     const tr = JSON.parse(game.set_ticket_price(9999));
     if (JSON.parse(game.state()).managed.ticketPrice !== fin.ticketRange[1]) throw 'faixa de ingresso: ' + tr.msg;
+    game.set_ticket_price(fin.ticketPrice); // ingresso no teto esvazia o estádio e afunda o caixa até a demissão
     if (!JSON.parse(game.take_bank_loan(100000)).ok) throw 'banco';
-    const cand = JSON.parse(game.market('', 1e12)).filter((p) => p.team !== null).sort((a, b) => a.loanFee - b.loanFee)[0];
+    const cand = JSON.parse(game.market('', 1e12)).filter((p) => p.team !== null)
+      // custo total até o fim da temporada (taxa + salários): um emprestado caro afundava o caixa e o técnico era demitido antes da reta final
+      .sort((a, b) => (a.loanFee + a.salary * 30) - (b.loanFee + b.salary * 30))[0];
     const lr = JSON.parse(game.loan_in(cand.id));
     if (!lr.ok) throw 'empréstimo: ' + lr.msg;
     out.push('emprestimos=ok');
@@ -1011,11 +1017,19 @@ if (location.search.includes('selftest')) (async () => {
     }
     }
     // reta final: joga até a última rodada e assiste ao vivo (tabela "se terminasse agora")
-    while (JSON.parse(game.state()).round < 28) game.play_round();
+    // as seções anteriores mexem no caixa (empréstimo de jogador, renovação, ingresso, banco): sem um técnico
+    // cuidando das contas o clube podia ficar no vermelho e ser DEMITIDO antes da última rodada (falha intermitente)
+    const keepSolvent = () => { const mm = JSON.parse(game.state()).managed; if (mm && mm.budget < 300000) game.take_bank_loan(Math.min(400000, Math.floor((mm.bankLimit - mm.bankDebt) / 1.12))); };
+    while (JSON.parse(game.state()).round < 28) {
+      keepSolvent();
+      game.play_round();
+      const s1 = JSON.parse(game.state());
+      if (!s1.managed) throw `reta final: técnico demitido na rodada ${s1.round} (caixa do teste no vermelho)`;
+    }
     refresh(); tab = 'jogos'; render();
-    if (!$('#liveTable .livetable') || !$('#liveTable').textContent.includes('Penúltima')) throw 'tabela ao vivo (penúltima)';
-    game.play_round(); refresh(); tab = 'jogos'; render();
-    if (!$('#liveTable').textContent.includes('Última rodada')) throw 'tabela ao vivo (última)';
+    if (!$('#liveTable .livetable') || !$('#liveTable').textContent.includes('Penúltima')) throw `tabela ao vivo (penúltima) rodada=${st.round}/${st.rounds}`;
+    keepSolvent(); game.play_round(); refresh(); tab = 'jogos'; render();
+    if (!$('#liveTable').textContent.includes('Última rodada')) throw `tabela ao vivo (última) rodada=${st.round}/${st.rounds} técnico=${!!st.managed}`;
     setSpeed('rapido');
     $('#btnPlay').click();
     await wait(() => JSON.parse(game.live())[0]?.minute >= 20, 5000);
