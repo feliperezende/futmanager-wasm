@@ -390,6 +390,34 @@ pub fn club_colors(id: usize) -> [(&'static str, &'static str); 2] {
     if b == a { b = 4; }
     [CLUB_COLORS[a], CLUB_COLORS[b]]
 }
+fn hex_rgb(h: &str) -> (f64, f64, f64) {
+    let v = u32::from_str_radix(h.trim_start_matches('#'), 16).unwrap_or(0);
+    (((v >> 16) & 255) as f64, ((v >> 8) & 255) as f64, (v & 255) as f64)
+}
+/// Distância de cor aproximada à percepção ("redmean"), 0..~765.
+pub fn color_distance(a: &str, b: &str) -> f64 {
+    let (r1, g1, b1) = hex_rgb(a); let (r2, g2, b2) = hex_rgb(b);
+    let rm = (r1 + r2) / 2.0; let (dr, dg, db) = (r1 - r2, g1 - g2, b1 - b2);
+    ((2.0 + rm / 256.0) * dr * dr + 4.0 * dg * dg + (2.0 + (255.0 - rm) / 256.0) * db * db).sqrt()
+}
+pub const KIT_CLASH: f64 = 150.0;
+pub const GRASS: &str = "#35a035";
+fn luma(h: &str) -> f64 { let (r, g, b) = hex_rgb(h); 0.299 * r + 0.587 * g + 0.114 * b }
+/// Uniformes da partida: o visitante troca para o 2º uniforme se as camisas se confundirem
+/// (entre si ou com o gramado). Retorna ([camisa, detalhe] mandante, visitante, visitante usa uniforme alternativo).
+pub fn match_kits(home: usize, away: usize) -> ([String; 2], [String; 2], bool) {
+    let h = club_colors(home); let a = club_colors(away);
+    // camisa verde demais some no gramado: o mandante usa a 2ª cor como principal
+    let hk = if color_distance(h[0].1, GRASS) < KIT_CLASH * 0.8 { [h[1].1.to_string(), h[0].1.to_string()] } else { [h[0].1.to_string(), h[1].1.to_string()] };
+    let ok = |c: &str| color_distance(c, &hk[0]) >= KIT_CLASH && color_distance(c, GRASS) >= KIT_CLASH * 0.8;
+    if ok(a[0].1) { return (hk.clone(), [a[0].1.into(), a[1].1.into()], false); }
+    // 1ª opção: inverter as cores do visitante; senão, uniforme claro ou escuro gerado
+    if ok(a[1].1) { return (hk.clone(), [a[1].1.into(), a[0].1.into()], true); }
+    let alt = if luma(&hk[0]) < 128.0 { "#f4f4f4" } else { "#181830" };
+    let trim = if color_distance(a[0].1, alt) >= 100.0 { a[0].1 } else if luma(alt) > 128.0 { "#1840c8" } else { "#f0d000" };
+    (hk, [alt.into(), trim.into()], true)
+}
+fn kits_json(h: usize, a: usize) -> serde_json::Value { let k = match_kits(h, a); serde_json::json!([[k.0[0], k.0[1]], [k.1[0], k.1[1]]]) }
 fn colors_json(id: usize) -> serde_json::Value { let c = club_colors(id); serde_json::json!([c[0].1, c[1].1, format!("{} e {}", c[0].0, c[1].0)]) }
 pub fn fmt_int(v: i64) -> String { fmt_money(v).replace("R$ ", "") }
 pub fn fmt_money(v: i64) -> String {
@@ -2082,7 +2110,7 @@ impl Game {
             "tactics": [&self.teams[m.home].tactic, &self.teams[m.away].tactic], "formations": [&self.teams[m.home].formation, &self.teams[m.away].formation],
             "energy": m.energy.iter().filter(|_| detail).map(|(k, v)| (k.to_string(), serde_json::json!(v))).collect::<serde_json::Map<String, serde_json::Value>>(),
 
-            "colors": [colors_json(m.home), colors_json(m.away)],
+            "colors": kits_json(m.home, m.away), "altKit": match_kits(m.home, m.away).2,
             "strength": if detail { serde_json::json!([0usize, 1].iter().map(|&s| { let (a, d) = self.strength_of(if s == 0 { m.home } else { m.away }, &m.on[s], Some(&m.energy)); [a, d] }).collect::<Vec<_>>()) } else { serde_json::Value::Null },
             "on": [on(0), on(1)]}) }).collect())
     }
@@ -3407,6 +3435,26 @@ mod copa {
             assert!(g.buy(2, g.free_agents()[0]).is_ok());
             let other = *g.squad(40).iter().find(|&&i| !g.is_key_player(i)).unwrap();
             assert!(g.buy(7, other).is_ok());
+        }
+    }
+
+    mod uniformes {
+        use super::super::*;
+        #[test]
+        fn clash_detection_and_alternate_kits() {
+            assert!(color_distance("#181818", "#5a1020") < KIT_CLASH, "preto x vinho se confundem");
+            assert!(color_distance("#1840c8", "#6030a0") < KIT_CLASH, "azul x roxo se confundem");
+            assert!(color_distance("#f4f4f4", "#181818") > KIT_CLASH);
+            assert!(color_distance("#0a8a2a", GRASS) < KIT_CLASH * 0.8, "verde some no gramado");
+            let mut alts = 0;
+            for h in 0..64 { for a in 0..64 { if h == a { continue; }
+                let (hk, ak, alt) = match_kits(h, a);
+                assert!(color_distance(&hk[0], &ak[0]) >= KIT_CLASH * 0.99 || color_distance(&ak[0], "#f4f4f4") < 1.0 || color_distance(&ak[0], "#181830") < 1.0, "{h} x {a}: {hk:?} {ak:?}");
+                assert_ne!(ak[0], ak[1]);
+                if alt { alts += 1; }
+                if !alt { assert_eq!(ak[0], club_colors(a)[0].1); }
+            } }
+            assert!(alts > 100, "poucos uniformes alternativos: {alts}");
         }
     }
 }

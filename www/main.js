@@ -951,6 +951,7 @@ if (location.search.includes('selftest')) (async () => {
       if (pitch.debug().frames < 5 || !px.some((v, i) => i % 4 === 1 && v > 100)) throw 'campinho: não desenhou';
       const real = JSON.parse(game.live()).find((x) => x.home === st.managed.id || x.away === st.managed.id);
       if (!real.colors || !real.strength) throw 'campinho: sem cores/força';
+      if (typeof real.altKit !== 'boolean' || real.colors[0][0] === real.colors[1][0]) throw 'campinho: uniformes da partida';
       // reage a um gol: animação segura o relógio e o som sai quando a bola entra
       const cv2 = document.createElement('canvas'); cv2.width = 320; cv2.height = 200;
       const tp = createPitch(cv2, { sfx, getSpeed });
@@ -1105,6 +1106,17 @@ if (location.search.includes('campinho')) {
   $('#btnNew').click();
   document.querySelector('#teamList button').click();
   localStorage.setItem('futmanager98_pref_pitch', '1'); setSpeed('normal');
+  if (location.search.includes('alt')) {
+    // escolhe um clube cujo jogo tenha choque de uniformes (visitante com o 2º uniforme)
+    const snap = game.save();
+    for (let i = 0; i < 64; i++) {
+      game = FutManager.load(snap); game.choose_team(i);
+      const mm = JSON.parse(game.start_round()).find((x) => x.home === i || x.away === i);
+      game = FutManager.load(snap); game.choose_team(i);
+      if (mm && mm.altKit) break;
+    }
+    refresh();
+  }
   closeWhere(() => true);
   tab = 'jogos'; refresh(); closeWhere(() => true);
   if (!location.search.includes('wait')) $('#btnPlay').click();

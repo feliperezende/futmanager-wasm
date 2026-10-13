@@ -5,7 +5,7 @@ const W = 320, H = 200, TOP = 18;
 const PX = { l: 8, r: 312, t: TOP + 6, b: H - 6 };
 const MIDX = 160, MIDY = (PX.t + PX.b) / 2, LEN = PX.r - PX.l;
 const C = { line: '#e8f8e8', black: '#000', white: '#fff', yel: '#ffe000', red: '#e01818', skin: '#f0b080', ref: '#101010',
-  board: '#101018', led: '#ffb000', crowd1: '#504860', crowd2: '#706080', net: '#d0d0d0', gk: ['#30d0a0', '#f09020'] };
+  board: '#101018', outline: '#0c1a0c', led: '#ffb000', crowd1: '#504860', crowd2: '#706080', net: '#d0d0d0', gk: ['#30d0a0', '#f09020'] };
 const lerp = (a, b, k) => a + (b - a) * k, clamp = (v, a, b) => Math.max(a, Math.min(b, v)), ease = (k) => k * k * (3 - 2 * k);
 
 // ---------------------------------------------------------------- fonte de pixels 3x5
@@ -187,11 +187,15 @@ export function createPitch(canvas, opts) {
     if (blink && Math.floor(clock * 8) % 2) return;
     x = Math.round(x); y = Math.round(y);
     const [c1, c2] = m.colors[side];
-    cx.fillStyle = 'rgba(0,0,0,.35)'; cx.fillRect(x - 1, y + 4, 4, 1);
-    cx.fillStyle = C.skin; cx.fillRect(x, y - 3, 2, 2);
-    cx.fillStyle = isGk ? C.gk[side] : c1; cx.fillRect(x - 1, y - 1, 4, 3);
-    if (!isGk) { cx.fillStyle = c2; cx.fillRect(x, y - 1, 2, 1); cx.fillRect(x - 1, y + 2, 4, 1); } // gola e calção na 2ª cor
-    cx.fillStyle = C.black; cx.fillRect(x - 1, y + 3, 1, 1); cx.fillRect(x + 2, y + 3, 1, 1);
+    cx.fillStyle = 'rgba(0,0,0,.3)'; cx.fillRect(x - 2, y + 4, 6, 1);              // sombra
+    // contorno escuro de 1px em volta da silhueta (legibilidade sobre o gramado)
+    cx.fillStyle = C.outline; cx.fillRect(x - 1, y - 5, 4, 4); cx.fillRect(x - 2, y - 3, 6, 6); cx.fillRect(x - 2, y + 2, 2, 2); cx.fillRect(x + 2, y + 2, 2, 2);
+    cx.fillStyle = C.skin; cx.fillRect(x, y - 4, 2, 2);                                 // cabeça
+    cx.fillStyle = isGk ? C.gk[side] : c1; cx.fillRect(x - 1, y - 2, 4, 3);              // camisa
+    if (!isGk) { cx.fillStyle = c2; cx.fillRect(x, y - 2, 2, 1); }                       // gola
+    cx.fillStyle = isGk ? C.black : c2; cx.fillRect(x - 1, y + 1, 4, 1);                  // calção
+    cx.fillStyle = C.skin; cx.fillRect(x - 1, y + 2, 1, 1); cx.fillRect(x + 2, y + 2, 1, 1); // pernas
+    if (Math.floor(clock * 6 + x) % 2) { cx.fillStyle = C.outline; cx.fillRect(x + 2, y + 2, 1, 1); }
   }
   function goal(xg, sh) {
     const d = xg < MIDX ? -1 : 1, s = sh > 0 ? Math.round(Math.sin(clock * 40) * 1.5) : 0;
@@ -217,8 +221,11 @@ export function createPitch(canvas, opts) {
     // placar
     cx.fillStyle = C.board; cx.fillRect(0, 0, W, TOP);
     if (m) {
-      text(shortName(m.homeName), 4, 6, C.white); cx.fillStyle = m.colors[0][0]; cx.fillRect(24, 5, 6, 7); cx.fillStyle = m.colors[0][1]; cx.fillRect(26, 5, 2, 7);
-      cx.fillStyle = m.colors[1][0]; cx.fillRect(290, 5, 6, 7); cx.fillStyle = m.colors[1][1]; cx.fillRect(292, 5, 2, 7); text(shortName(m.awayName), 300, 6, C.white);
+      // uniformes da partida (camisa + detalhe), com moldura clara para destacar no placar escuro
+      const kit = (x, k) => { cx.fillStyle = '#c0c0c0'; cx.fillRect(x - 1, 3, 10, 12); cx.fillStyle = k[0]; cx.fillRect(x, 4, 8, 7); cx.fillStyle = k[1]; cx.fillRect(x + 3, 4, 2, 7); cx.fillRect(x, 11, 8, 3); };
+      text(shortName(m.homeName), 4, 6, C.white); kit(22, m.colors[0]);
+      kit(287, m.colors[1]); text(shortName(m.awayName), 300, 6, C.white);
+      if (m.altKit) text('2', 281, 6, C.led);
       const sc = `${m.hg}-${m.ag}`; text(sc, (W - textW(sc, 2)) / 2, 4, C.led, 2);
       text(String(minute).padStart(2, '0') + "'", 92, 6, C.led);
       const per = ctxInfo.shootout ? `PEN ${pens[0]}-${pens[1]}` : ctxInfo.halftime ? 'INT' : ['1T', '1T', '2T', 'PR1', 'PR2'][half()];
