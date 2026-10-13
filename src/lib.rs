@@ -1679,6 +1679,8 @@ impl Game {
         if p.retired { return Err("Jogador aposentado".into()); }
         if p.loan_from.is_some() { return Err("Jogador emprestado não pode ser negociado".into()); }
         if p.team.is_some() && !self.window_open() { return Err("Janela de transferências fechada: só é possível contratar jogadores livres".into()); }
+        // o técnico (usuário) só compra de outro clube negociando: preço mínimo escondido e recusa de peças-chave
+        if p.team.is_some() && Some(buyer) == self.managed { return Err("Jogador de outro clube: faça uma proposta na janela de negociação".into()); }
         if self.squad(buyer).len() >= MAX_SQUAD { return Err(format!("Elenco cheio (máx. {})", MAX_SQUAD)); }
         if let Some(seller) = p.team { if self.squad(seller).len() <= MIN_SQUAD { return Err("O clube vendedor não pode liberar mais jogadores".into()); } }
         let price = self.buy_price(id);
@@ -2202,7 +2204,9 @@ impl Game {
             let target = self.players.iter().filter(|p| !p.retired && !p.academy && p.loan_from.is_none() && p.team != Some(t)
                 && p.skill > median + 3 && p.age <= 29 && p.team.map_or(true, |o| self.squad(o).len() > MIN_SQUAD))
                 .map(|p| p.id).filter(|&id| self.buy_price(id) + self.wage_demand(id, 3, Some(t)) * ROUNDS as i64 <= free / 2).max_by_key(|&id| self.players[id].skill);
-            if let Some(id) = target { let _ = self.buy(t, id); }
+            if let Some(id) = target {
+                if self.players[id].team.is_none() { let _ = self.buy(t, id); } else { let offer = self.reserve_price(id); let _ = self.negotiate(t, id, offer); }
+            }
         }
         // investimentos
         let free = self.teams[t].budget - reserve;
@@ -2486,9 +2490,10 @@ mod tests {
         g.managed = Some(10);
         g.teams[10].budget = 100_000_000;
         let target = g.squad(20)[0];
-        let price = g.buy_price(target);
+        let price = g.reserve_price(target);
         let before = g.teams[10].budget;
-        g.buy(10, target).unwrap();
+        assert!(g.buy(10, target).is_err(), "compra direta de outro clube deve exigir negociação");
+        assert_eq!(g.negotiate(10, target, price).unwrap()["status"], "accepted");
         assert_eq!(g.players[target].team, Some(10));
         assert_eq!(g.teams[10].budget, before - price);
         assert_eq!(g.squad(10).len(), 19);
@@ -3379,6 +3384,29 @@ mod copa {
             let mut g = Game::new(11); let mut n = 0;
             for _ in 0..6 { for m in g.play_round() { n += m.events.iter().filter(|e| e.kind == "lesao").count(); } }
             assert!(n > 0);
+        }
+    }
+
+    mod compra_negociada {
+        use super::super::*;
+        #[test]
+        fn direct_buy_cannot_skip_negotiation() {
+            let mut g = Game::new(31); g.managed = Some(2); g.teams[2].budget = 1_000_000_000;
+            assert!(g.window_open());
+            let sq = g.squad(30);
+            let common = *sq.iter().find(|&&i| !g.is_key_player(i)).unwrap();
+            let key = *sq.iter().find(|&&i| g.is_key_player(i)).unwrap();
+            // API direta bloqueada mesmo com a janela aberta e dinheiro sobrando
+            assert!(g.buy(2, common).unwrap_err().contains("negocia"));
+            assert!(g.buy(2, key).is_err());
+            assert_eq!(g.players[common].team, Some(30));
+            // pela negociação: abaixo do mínimo escondido não sai, peça-chave é recusada
+            assert_ne!(g.negotiate(2, common, g.buy_price(common) / 2).unwrap()["status"], "accepted");
+            assert_eq!(g.negotiate(2, key, g.buy_price(key)).unwrap()["status"], "refused");
+            // livres continuam com contratação direta; IA continua comprando direto
+            assert!(g.buy(2, g.free_agents()[0]).is_ok());
+            let other = *g.squad(40).iter().find(|&&i| !g.is_key_player(i)).unwrap();
+            assert!(g.buy(7, other).is_ok());
         }
     }
 }

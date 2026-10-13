@@ -37,6 +37,11 @@ export function initTeams(c) {
 export const closeTeam = () => closeWhere((k) => k.startsWith('team-'));
 export const closePlayer = () => closeWhere((k) => k.startsWith('player-'));
 
+// Compra de jogador de outro clube: sempre pela janela de negociação (fechada fora da janela de transferências)
+function buyBtn(p, attr) {
+  const open = ctx.marketOpen();
+  return `<button ${attr}="${p.id}" ${open ? '' : 'disabled'} title="${open ? `Negociar (preço pedido ${money(p.buyPrice)})` : 'Janela de transferências fechada'}">Negociar</button>`;
+}
 // ---------------------------------------------------------------- ficha do clube
 const COLS = [
   ['pos', 'Pos', (p) => ORDER[p.pos]], ['name', 'Nome', (p) => p.name], ['skill', 'Hab.', (p) => p.skill], ['attrs', 'Fin/Pas/Mar/Gol/Res', (p) => p.attrs.finishing + p.attrs.passing],
@@ -73,11 +78,11 @@ export function openTeam(id) {
       ${squad.map((p) => `<tr class="${inXI.has(p.id) ? 'xi' : ''}"><td class="pos-${p.pos}">${p.pos}</td><td>${playerLink(p.id, p.name)}${inXI.has(p.id) ? ' <small title="Titular provável">★</small>' : ''}<small>${flags(p)}</small></td><td>${p.skill}</td>
         <td><small>${p.attrs.finishing}/${p.attrs.passing}/${p.attrs.tackling}/${p.attrs.keeping}/${p.attrs.stamina}</small></td><td>${cond(p.condition)}</td><td>${p.age}</td><td>${money(p.salary)}</td><td>${money(p.value)}</td><td>${p.goals}</td><td>${moraleIcon(p.morale)}</td>
         <td>${p.loanFrom ? `<small>emprestado (${esc(p.loanFrom)})</small>` : 'até T' + p.contractUntil}</td><td>${t.managed ? '—' : money(p.buyPrice)}</td>
-        <td class="nowrap">${act && !p.loanFrom ? `<button data-tvbuy="${p.id}" title="Comprar por ${money(p.buyPrice)}">Comprar</button> <button data-tvloan="${p.id}" title="Empréstimo até o fim da temporada: ${money(p.loanFee)}">Emprestar</button>` : ''}</td></tr>`).join('')}
+        <td class="nowrap">${act && !p.loanFrom ? `${buyBtn(p, 'data-tvneg')} <button data-tvloan="${p.id}" title="Empréstimo até o fim da temporada: ${money(p.loanFee)}">Emprestar</button>` : ''}</td></tr>`).join('')}
       </table></div><small>★ titular provável · clique no cabeçalho para ordenar · clique no nome para ver o cartão do jogador</small>`;
     m.querySelectorAll('[data-sort]').forEach((h) => h.onclick = () => { if (sortKey === h.dataset.sort) sortDir = -sortDir; else { sortKey = h.dataset.sort; sortDir = ['skill', 'value', 'goals', 'salary', 'condition', 'morale'].includes(sortKey) ? -1 : 1; } draw(); });
     const doAct = (fn, pid) => { const r = JSON.parse(fn(pid)); ctx.flash(r); ctx.refresh(); if (r.ok) { w.close(); } };
-    m.querySelectorAll('[data-tvbuy]').forEach((b) => b.onclick = () => { if (confirm('Comprar este jogador?')) doAct((x) => ctx.game().buy(x), +b.dataset.tvbuy); });
+    m.querySelectorAll('[data-tvneg]').forEach((b) => b.onclick = () => ctx.negotiate(t.squad.find((p) => p.id === +b.dataset.tvneg)));
     m.querySelectorAll('[data-tvloan]').forEach((b) => b.onclick = () => doAct((x) => ctx.game().loan_in(x), +b.dataset.tvloan));
   };
   draw();
@@ -97,9 +102,10 @@ export function openPlayer(id) {
       <tr><td>Gols na temporada</td><td>${p.goals}</td></tr>
       <tr><td>Contrato</td><td>${p.loanFrom ? 'emprestado pelo ' + esc(p.loanFrom) : p.contractUntil ? 'até a temporada ' + p.contractUntil : '—'} · ${money(p.salary)}/rod.</td></tr>
       <tr><td>Valor de mercado</td><td>${money(p.value)}${act ? ` · preço ${money(p.buyPrice)}` : ''}</td></tr></table>
-    ${act ? `<button id="pcBuy">Comprar (${money(p.buyPrice)})</button> ${p.team !== null ? `<button id="pcLoan">Empréstimo (${money(p.loanFee)})</button>` : ''}` : ''}`;
+    ${act ? `${p.team === null ? `<button id="pcBuy">Contratar (${money(p.buyPrice)})</button>` : buyBtn(p, 'id="pcNeg" data-x')} ${p.team !== null ? `<button id="pcLoan">Empréstimo (${money(p.loanFee)})</button>` : ''}` : ''}`;
   const doAct = (r) => { r = JSON.parse(r); ctx.flash(r); ctx.refresh(); if (r.ok) { w.close(); closeTeam(); } };
-  const b = m.querySelector('#pcBuy'); if (b) b.onclick = () => { if (confirm('Comprar este jogador?')) doAct(ctx.game().buy(id)); };
+  const b = m.querySelector('#pcBuy'); if (b) b.onclick = () => { if (confirm('Contratar este jogador livre?')) doAct(ctx.game().buy(id)); };
+  const n = m.querySelector('#pcNeg'); if (n) n.onclick = () => ctx.negotiate(p);
   const l = m.querySelector('#pcLoan'); if (l) l.onclick = () => doAct(ctx.game().loan_in(id));
 }
 

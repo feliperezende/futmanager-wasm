@@ -241,7 +241,8 @@ $('#mainBtns').innerHTML = tbtn('min', 'wm-min') + tbtn('max', 'wm-max') + tbtn(
 const mainWin = manageMain($('#app'), '⚽ FutManager 98');
 let gameVersion = '';
 document.querySelectorAll('.menubar [data-tab]').forEach((b) => b.onclick = () => { if (b.dataset.tab === 'historico') { openHistory(); return; } if (b.dataset.tab === 'copa') { openCup(st); return; } if (b.dataset.tab === 'jornal') { showJornal(); return; } if (!playing) { tab = b.dataset.tab; render(); } });
-initTeams({ game: () => game, getState: () => st, refresh: () => { refresh(); }, flash, canAct: () => !playing });
+initTeams({ game: () => game, getState: () => st, refresh: () => { refresh(); }, flash, canAct: () => !playing,
+  marketOpen: () => !!(st && st.market && st.market.open), negotiate: (p) => openNegotiation(p, st, mctx) });
 
 
 // ------------------------------------------------ Render
@@ -727,7 +728,7 @@ if (location.search.includes('selftest')) (async () => {
     document.querySelector('.wm-team [data-sort="skill"]').click();
     const sk = [...document.querySelectorAll('.wm-team .sortable tr')].slice(1).map((r) => +r.children[2].textContent);
     if (sk.some((v, i) => i && v > sk[i - 1])) throw 'ordenação por habilidade';
-    if (!document.querySelector('.wm-team [data-tvbuy]') || !document.querySelector('.wm-team [data-tvloan]')) throw 'ações de mercado na ficha';
+    if (!document.querySelector('.wm-team [data-tvneg]') || !document.querySelector('.wm-team [data-tvloan]')) throw 'ações de mercado na ficha';
     document.querySelector('.wm-team .plink').click();
     if (!$('.wm-player') || !$('.wm-player').textContent.includes('Finalização')) throw 'cartão do jogador';
     openTeam(st.managed.id);
@@ -839,6 +840,17 @@ if (location.search.includes('selftest')) (async () => {
         }
         if (!got) throw 'mercado: nenhuma contraproposta ' + seen.slice(0, 5);
       } else if (JSON.parse(game.negotiate(other.id, 1e6)).ok) throw 'mercado: compra com janela fechada';
+      // nenhum caminho compra direto de outro clube
+      const dr = JSON.parse(game.buy(other.id));
+      if (dr.ok || !/negocia|fechada/.test(dr.msg)) throw 'mercado: compra direta sem negociação ' + dr.msg;
+      openTeam(other.team);
+      const tw = document.querySelector('[id^="team-' + other.team + '"]') || document;
+      if (tw.querySelector('[data-tvbuy]') || !tw.querySelector('[data-tvneg]')) throw 'mercado: ficha do clube sem negociação';
+      if (ms.market.open) { tw.querySelector('[data-tvneg]').click(); if (!getWindow('negociar')) throw 'mercado: ficha não abriu negociação'; closeWindow('negociar'); }
+      closeTeam();
+      openPlayer(other.id);
+      if (document.querySelector('#pcBuy') || !document.querySelector('#pcNeg')) throw 'mercado: cartão do jogador sem negociação';
+      closePlayer();
       tab = 'mercado'; refresh();
       if (!$('.mkbanner') || !$('#mkOffers')) throw 'mercado: aba sem janela/propostas';
       $('#mkOffers').click();
